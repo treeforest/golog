@@ -131,17 +131,6 @@ func newZapLogger(logConfig *Config, level zap.AtomicLevel, writer ...io.Writer)
 }
 
 // getHook 创建日志滚动处理器
-// 参数:
-//
-//	filename      - 基础日志文件名
-//	maxAge        - 最大保留天数
-//	rotationTime  - 滚动间隔小时数
-//	rotationSize  - 滚动大小阈值（MB）
-//
-// 返回值:
-//
-//	io.Writer - 日志输出处理器
-//	error     - 错误信息
 func getHook(filename string, maxAgeDays, rotationHours int, rotationSizeMB int64) (io.Writer, error) {
 	var opts []rotatelogs.Option
 	opts = append(opts, rotatelogs.WithLinkName(filename))
