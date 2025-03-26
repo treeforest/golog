@@ -20,6 +20,7 @@ const (
 
 var colorList = [...]color{colorRed, colorGreen, colorYellow, colorBlue, colorMagenta}
 
+// nolint
 func showColor(color color, msg string) string {
 	return fmt.Sprintf("\033[%dm%s\033[0m", int(color), msg)
 }

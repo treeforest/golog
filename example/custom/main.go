@@ -10,7 +10,11 @@ func main() {
 	)
 	golog.SetDefaultLogger(golog.NewLogger(logConfig))
 
-	defer golog.Sync()
+	defer func() {
+		if err := golog.Sync(); err != nil {
+			panic(err)
+		}
+	}()
 
 	golog.Debug("debug message")
 	golog.Info("info message")

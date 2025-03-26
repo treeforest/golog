@@ -1,7 +1,6 @@
 package golog
 
 import (
-	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,7 +29,9 @@ func TestBasicLogging(t *testing.T) {
 
 	// 初始化日志记录器
 	logger := NewLogger(config)
-	defer logger.Sync()
+	defer func() {
+		_ = logger.Sync()
+	}()
 
 	// 记录不同级别的日志
 	logger.Debug("这应该不会出现")
@@ -43,7 +44,7 @@ func TestBasicLogging(t *testing.T) {
 	assert.NoError(t, err, "日志文件应该存在")
 
 	// 读取日志内容
-	content, err := ioutil.ReadFile(logPath)
+	content, err := os.ReadFile(logPath)
 	assert.NoError(t, err)
 	logOutput := string(content)
 
@@ -69,11 +70,13 @@ func TestJSONFormat(t *testing.T) {
 	)
 
 	logger := NewLogger(config)
-	defer logger.Sync()
+	defer func() {
+		_ = logger.Sync()
+	}()
 
 	logger.Infow("JSON测试", "key", "value")
 
-	content, _ := ioutil.ReadFile(logPath)
+	content, _ := os.ReadFile(logPath)
 	assert.Contains(t, string(content), `"level":"[INFO]"`, "应该包含JSON格式的级别字段")
 	assert.Contains(t, string(content), `"key":"value"`, "应该包含结构化字段")
 }
@@ -92,7 +95,9 @@ func TestSizeBasedRotation(t *testing.T) {
 	)
 
 	logger := NewLogger(config)
-	defer logger.Sync()
+	defer func() {
+		_ = logger.Sync()
+	}()
 
 	// 写入超过1MB的数据
 	const chunk = "ABCDEFGHIJ"      // 10 bytes
@@ -115,7 +120,9 @@ func TestConcurrentLogging(t *testing.T) {
 		WithLogInConsole(false),
 	)
 	logger := NewLogger(config)
-	defer logger.Sync()
+	defer func() {
+		_ = logger.Sync()
+	}()
 
 	var wg sync.WaitGroup
 	const workers = 100
@@ -133,7 +140,7 @@ func TestConcurrentLogging(t *testing.T) {
 	wg.Wait()
 
 	// 验证日志完整性
-	content, _ := ioutil.ReadFile(logPath)
+	content, _ := os.ReadFile(logPath)
 	lines := strings.Split(string(content), "\n")
 	assert.Greater(t, len(lines), workers*100-10, "应该记录所有并发日志")
 }
@@ -149,11 +156,13 @@ func TestStackTrace(t *testing.T) {
 	)
 
 	logger := NewLogger(config)
-	defer logger.Sync()
+	defer func() {
+		_ = logger.Sync()
+	}()
 
 	logger.Error("触发错误")
 
-	content, _ := ioutil.ReadFile(logPath)
+	content, _ := os.ReadFile(logPath)
 	assert.Contains(t, string(content), "testing.tRunner", "应该包含堆栈信息")
 }
 
@@ -171,12 +180,14 @@ func TestColorOutput(t *testing.T) {
 	)
 
 	logger := NewLogger(config)
-	defer logger.Sync()
+	defer func() {
+		_ = logger.Sync()
+	}()
 
 	logger.Info("带颜色信息")
 
 	// 由于颜色代码检查较复杂，此处简化验证
-	content, _ := ioutil.ReadFile(logPath)
+	content, _ := os.ReadFile(logPath)
 	assert.Contains(t, string(content), "@", "服务名称应该带颜色代码")
 }
 
@@ -191,16 +202,18 @@ func TestDynamicLevel(t *testing.T) {
 	}
 
 	logger := NewLogger(config)
-	defer logger.Sync()
+	defer func() {
+		_ = logger.Sync()
+	}()
 
 	// 初始级别为INFO
 	logger.Debug("调试信息1")
-	content, _ := ioutil.ReadFile(logPath)
+	content, _ := os.ReadFile(logPath)
 	assert.NotContains(t, string(content), "调试信息1")
 
 	// 调整为DEBUG级别
 	logger.SetLevel(DebugLevel)
 	logger.Debug("调试信息2")
-	content, _ = ioutil.ReadFile(logPath)
+	content, _ = os.ReadFile(logPath)
 	assert.Contains(t, string(content), "调试信息2")
 }

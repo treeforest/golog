@@ -6,7 +6,12 @@ func main() {
 	logConfig := golog.NewConfig(golog.WithJsonFormat(true))
 	customLogger := golog.NewLogger(logConfig)
 	golog.SetDefaultLogger(customLogger)
-	defer golog.Sync()
+
+	defer func() {
+		if err := golog.Sync(); err != nil {
+			panic(err)
+		}
+	}()
 
 	golog.Debug("debug message")
 	golog.Info("info message")

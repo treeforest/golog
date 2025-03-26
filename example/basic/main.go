@@ -5,7 +5,11 @@ import (
 )
 
 func main() {
-	defer golog.Sync()
+	defer func() {
+		if err := golog.Sync(); err != nil {
+			panic(err)
+		}
+	}()
 
 	golog.Debug("debug message")
 	golog.Info("info message")
@@ -21,6 +25,10 @@ func main() {
 	golog.Error("error message")
 
 	customLogger := golog.NewLogger(nil)
-	defer customLogger.Sync()
+	defer func() {
+		if err := customLogger.Sync(); err != nil {
+			panic(err)
+		}
+	}()
 	customLogger.Debug("hello world")
 }
