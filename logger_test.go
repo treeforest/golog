@@ -173,7 +173,7 @@ func TestColorOutput(t *testing.T) {
 
 	config := NewConfig(
 		WithModule("testing"),
-		WithService("color"),
+		WithComponent("color"),
 		WithPath(logPath),
 		WithShowColor(true),
 		WithLogInConsole(true), // 需要测试控制台输出

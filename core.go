@@ -97,16 +97,16 @@ func newZapLogger(logConfig *Config, level zap.AtomicLevel, writer ...io.Writer)
 		level,
 	)
 
-	// 构造服务名称显示格式
-	serviceName := fmt.Sprintf("@%s", logConfig.Service)
+	// 构造组件名称显示格式
+	componentName := fmt.Sprintf("@%s", logConfig.Component)
 	if logConfig.ShowColor {
-		serviceName = getColorServiceName(serviceName)
+		componentName = getColorServiceName(componentName)
 	}
 
 	// 组装完整记录器名称
 	var name string
-	if logConfig.Service != "" {
-		name = fmt.Sprintf("%s %s", logConfig.Module, serviceName)
+	if logConfig.Component != "" {
+		name = fmt.Sprintf("%s %s", logConfig.Module, componentName)
 	} else {
 		name = logConfig.Module
 	}

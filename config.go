@@ -10,7 +10,7 @@ const (
 // Config 日志配置结构体
 type Config struct {
 	Module          string // 模块名称（显示在日志中）
-	Service         string // 服务名称（显示在日志中）
+	Component       string // 组件名称（显示在日志中）
 	Path            string // 日志文件存储路径（如：/var/log/app.log）
 	Level           Level  // 日志级别（DebugLevel/InfoLevel/WarnLevel/ErrorLevel）
 	MaxAgeDays      int    // 日志文件最长保留天数（超过将自动删除）
@@ -57,9 +57,9 @@ func WithModule(module string) Option {
 	}
 }
 
-func WithService(service string) Option {
+func WithComponent(component string) Option {
 	return func(c *Config) {
-		c.Service = service
+		c.Component = component
 	}
 }
 
