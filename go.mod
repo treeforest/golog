@@ -1,6 +1,8 @@
 module github.com/treeforest/golog
 
-go 1.18
+go 1.21
+
+toolchain go1.22.12
 
 require (
 	github.com/lestrrat-go/file-rotatelogs v2.4.0+incompatible

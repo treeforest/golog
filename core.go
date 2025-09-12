@@ -12,6 +12,22 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
+// noopSyncWriter 是对 zapcore.WriteSyncer 的装饰器实现
+// 功能：包装一个基础 WriteSyncer 并覆盖其 Sync 方法，使其不执行任何同步操作
+// 设计目的：解决对某些特殊输出流（如 os.Stderr）调用 Sync 方法时可能出现的
+//
+//	"sync /dev/stderr: invalid argument" 错误
+//
+// 适用场景：当底层写入器不需要或不支持 Sync 操作时使用
+type noopSyncWriter struct {
+	zapcore.WriteSyncer
+}
+
+// Sync 空实现，不执行任何操作
+func (n *noopSyncWriter) Sync() error {
+	return nil
+}
+
 func NewLogger(logConfig *Config, writer ...io.Writer) Logger {
 	if logConfig == nil {
 		logConfig = defaultConfig()
@@ -36,24 +52,30 @@ func initSugarLogger(logConfig *Config, writer ...io.Writer) (*zap.SugaredLogger
 
 // newZapLogger 创建日志记录器
 func newZapLogger(logConfig *Config, level zap.AtomicLevel, writer ...io.Writer) *zap.Logger {
-	// 初始化日志滚动钩子
-	hook, err := getHook(logConfig.Path, logConfig.MaxAgeDays, logConfig.RotationHours, logConfig.RotationSizeMB)
-	if err != nil {
-		log.Fatalf("new zap logger get hook failed, %s", err)
-	}
-
 	// 配置多路输出
-	var syncer zapcore.WriteSyncer
-	syncers := []zapcore.WriteSyncer{zapcore.AddSync(hook)} // 主日志文件输出
+	var syncers []zapcore.WriteSyncer
+	if logConfig.LogInFile {
+		// 初始化日志滚动钩子
+		hook, err := getHook(logConfig.Path, logConfig.MaxAgeDays, logConfig.RotationHours, logConfig.RotationSizeMB)
+		if err != nil {
+			log.Fatalf("new zap logger get hook failed, %s", err)
+		}
+		syncers = append(syncers, zapcore.AddSync(hook)) // 日志文件输出
+	}
 	if logConfig.LogInConsole {
-		syncers = append(syncers, zapcore.AddSync(os.Stdout)) // 控制台输出
+		syncers = append(syncers, zapcore.AddSync(&noopSyncWriter{os.Stderr})) // 控制台输出
 	}
 	// 添加额外输出目标
 	for _, outSyncer := range writer {
 		syncers = append(syncers, zapcore.AddSync(outSyncer))
 	}
 
+	if len(syncers) == 0 {
+		log.Fatal("no log output target")
+	}
+
 	// 创建多路同步器
+	var syncer zapcore.WriteSyncer
 	syncer = zapcore.NewMultiWriteSyncer(syncers...)
 
 	// 构建编码器配置
@@ -113,9 +135,6 @@ func newZapLogger(logConfig *Config, level zap.AtomicLevel, writer ...io.Writer)
 
 	// 创建基础日志器
 	logger := zap.New(core).Named(name)
-	defer func(logger *zap.Logger) {
-		_ = logger.Sync()
-	}(logger)
 
 	// 添加调用位置显示
 	if logConfig.ShowLine {

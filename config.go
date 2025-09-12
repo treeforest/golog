@@ -18,6 +18,7 @@ type Config struct {
 	RotationSizeMB  int64  // 日志滚动大小阈值（单位：MB）
 	JsonFormat      bool   // 是否使用JSON格式输出日志
 	ShowLine        bool   // 是否显示调用文件名和行号
+	LogInFile       bool   // 是否输入日志到文件
 	LogInConsole    bool   // 是否同时在控制台输出日志
 	ShowColor       bool   // 是否在控制台显示彩色日志
 	IsBrief         bool   // 是否启用简洁模式（不显示级别、调用位置等信息）
@@ -34,6 +35,7 @@ func defaultConfig() *Config {
 		RotationSizeMB:  defaultRotationSizeMB,
 		JsonFormat:      false,
 		ShowLine:        true,
+		LogInFile:       true,
 		LogInConsole:    true,
 		ShowColor:       false,
 		IsBrief:         false,
@@ -102,6 +104,12 @@ func WithJsonFormat(jsonFormat bool) Option {
 func WithShowLine(showLine bool) Option {
 	return func(c *Config) {
 		c.ShowLine = showLine
+	}
+}
+
+func WithLogInFile(logInFile bool) Option {
+	return func(c *Config) {
+		c.LogInFile = logInFile
 	}
 }
 

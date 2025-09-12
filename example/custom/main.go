@@ -1,12 +1,15 @@
 package main
 
-import "github.com/treeforest/golog"
+import (
+	"github.com/treeforest/golog"
+)
 
 func main() {
 	logConfig := golog.NewConfig(
 		golog.WithModule("user"),     // 模块名
 		golog.WithComponent("login"), // 服务名
 		golog.WithJsonFormat(true),   // 以json格式输出
+		golog.WithLogInFile(false),
 	)
 	golog.SetDefaultLogger(golog.NewLogger(logConfig))
 
