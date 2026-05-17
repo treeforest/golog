@@ -1,6 +1,6 @@
 package main
 
-import "github.com/treeforest/golog"
+import "github.com/treeforest/golog/v2"
 
 func main() {
 	logConfig := golog.NewConfig(golog.WithJsonFormat(true))

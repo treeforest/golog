@@ -1,6 +1,8 @@
 package golog
 
 import (
+	"sync"
+
 	"go.uber.org/zap"
 )
 
@@ -30,11 +32,19 @@ type Logger interface {
 	SetLevel(lvl Level)
 	GetLevel() Level
 	Sync() error
+
+	// Zap 返回底层强类型 zap.Logger，适用于热路径
+	Zap() *zap.Logger
+	// Clone 创建独立副本（内建 AddCallerSkip(1)），用于设为全局默认而不修改原实例
+	Clone() Logger
 }
 
+// coreLogger 基于 zap 的 Logger 实现
 type coreLogger struct {
 	*zap.SugaredLogger
-	atomicLevel zap.AtomicLevel
+	zapLogger   *zap.Logger     // 底层 zap.Logger，供 Zap() 与选项变更使用
+	atomicLevel zap.AtomicLevel // 原子级别，支持运行时 SetLevel
+	rotWriter   *rotatingWriter // 文件轮转写入器，仅根实例持有；Sync 时关闭
 }
 
 var _ Logger = (*coreLogger)(nil)
@@ -49,94 +59,134 @@ func (l *coreLogger) GetLevel() Level {
 }
 
 func (l *coreLogger) AddCallerSkip(skip int) {
-	l.SugaredLogger = l.WithOptions(zap.AddCallerSkip(skip))
+	l.zapLogger = l.zapLogger.WithOptions(zap.AddCallerSkip(skip))
+	l.SugaredLogger = l.zapLogger.Sugar()
 }
 
-// 全局默认日志器
-var defaultLogger Logger
-
-func init() {
-	SetDefaultLogger(NewLogger(defaultConfig()))
+// Zap 返回底层 *zap.Logger
+func (l *coreLogger) Zap() *zap.Logger {
+	return l.zapLogger
 }
 
+// Clone 克隆 Logger 并增加一层 caller skip，不修改原实例
+func (l *coreLogger) Clone() Logger {
+	zl := l.zapLogger.WithOptions(zap.AddCallerSkip(1))
+	return &coreLogger{
+		SugaredLogger: zl.Sugar(),
+		zapLogger:     zl,
+		atomicLevel:   l.atomicLevel,
+	}
+}
+
+func (l *coreLogger) Sync() error {
+	if l.rotWriter != nil {
+		l.rotWriter.close()
+	}
+	return l.zapLogger.Sync()
+}
+
+var (
+	defaultMu     sync.RWMutex // 保护 defaultLogger 并发读写
+	defaultLogger Logger
+	defaultOnce   sync.Once // 首次调用全局方法时懒加载默认 Logger
+)
+
+// getDefault 获取全局默认 Logger（懒加载 + 读锁）
+func getDefault() Logger {
+	defaultOnce.Do(func() {
+		defaultMu.Lock()
+		defer defaultMu.Unlock()
+		// SetDefaultLogger 可能已在首次调用前设置；勿用 defaultConfig 覆盖
+		if defaultLogger != nil {
+			return
+		}
+		defaultLogger = NewLogger(defaultConfig()).Clone()
+	})
+	defaultMu.RLock()
+	defer defaultMu.RUnlock()
+	return defaultLogger
+}
+
+// SetDefaultLogger 设置全局默认 Logger（内部 Clone，不修改传入实例）
 func SetDefaultLogger(logger Logger) {
-	// 调整调用栈深度加 1
-	logger.AddCallerSkip(1)
-	defaultLogger = logger
+	cloned := logger.Clone()
+	defaultMu.Lock()
+	defaultLogger = cloned
+	defaultMu.Unlock()
 }
 
 func Debug(args ...interface{}) {
-	defaultLogger.Debug(args...)
+	getDefault().Debug(args...)
 }
 
 func Debugf(format string, args ...interface{}) {
-	defaultLogger.Debugf(format, args...)
+	getDefault().Debugf(format, args...)
 }
 
 func Debugw(msg string, keysAndValues ...interface{}) {
-	defaultLogger.Debugw(msg, keysAndValues...)
+	getDefault().Debugw(msg, keysAndValues...)
 }
 
 func Info(args ...interface{}) {
-	defaultLogger.Info(args...)
+	getDefault().Info(args...)
 }
 
 func Infof(format string, args ...interface{}) {
-	defaultLogger.Infof(format, args...)
+	getDefault().Infof(format, args...)
 }
 
 func Infow(msg string, keysAndValues ...interface{}) {
-	defaultLogger.Infow(msg, keysAndValues...)
+	getDefault().Infow(msg, keysAndValues...)
 }
 
 func Warn(args ...interface{}) {
-	defaultLogger.Warn(args...)
+	getDefault().Warn(args...)
 }
 
 func Warnf(format string, args ...interface{}) {
-	defaultLogger.Warnf(format, args...)
+	getDefault().Warnf(format, args...)
 }
 
 func Warnw(msg string, keysAndValues ...interface{}) {
-	defaultLogger.Warnw(msg, keysAndValues...)
+	getDefault().Warnw(msg, keysAndValues...)
 }
 
 func Error(args ...interface{}) {
-	defaultLogger.Error(args...)
+	getDefault().Error(args...)
 }
 
 func Errorf(format string, args ...interface{}) {
-	defaultLogger.Errorf(format, args...)
+	getDefault().Errorf(format, args...)
 }
 
 func Errorw(msg string, keysAndValues ...interface{}) {
-	defaultLogger.Errorw(msg, keysAndValues...)
+	getDefault().Errorw(msg, keysAndValues...)
 }
 
 func Fatal(args ...interface{}) {
-	defaultLogger.Fatal(args...)
+	getDefault().Fatal(args...)
 }
 
 func Fatalf(format string, args ...interface{}) {
-	defaultLogger.Fatalf(format, args...)
+	getDefault().Fatalf(format, args...)
 }
 
 func Fatalw(msg string, keysAndValues ...interface{}) {
-	defaultLogger.Fatalw(msg, keysAndValues...)
+	getDefault().Fatalw(msg, keysAndValues...)
 }
 
 func SetLevel(lvl Level) {
-	defaultLogger.SetLevel(lvl)
+	getDefault().SetLevel(lvl)
 }
 
 func GetLevel() Level {
-	return defaultLogger.GetLevel()
+	return getDefault().GetLevel()
 }
 
 func AddCallerSkip(skip int) {
-	defaultLogger.AddCallerSkip(skip)
+	getDefault().AddCallerSkip(skip)
 }
 
 func Sync() error {
-	return defaultLogger.Sync()
+	return getDefault().Sync()
 }

@@ -1,15 +1,20 @@
 package main
 
 import (
-	"github.com/treeforest/golog"
+	"context"
+
+	"github.com/treeforest/golog/v2"
 )
 
 func main() {
 	logConfig := golog.NewConfig(
-		golog.WithModule("user"),     // 模块名
-		golog.WithComponent("login"), // 服务名
-		golog.WithJsonFormat(true),   // 以json格式输出
-		golog.WithLogInFile(false),
+		golog.WithModule("user"),
+		golog.WithComponent("login"),
+		golog.WithPath("./logs/app.log"),
+		golog.WithJsonFormat(true),
+		golog.WithLogInFile(true),
+		golog.WithLogInConsole(true),
+		golog.WithRotationSizeMB(1),
 	)
 	golog.SetDefaultLogger(golog.NewLogger(logConfig))
 
@@ -19,13 +24,11 @@ func main() {
 		}
 	}()
 
-	golog.Debug("debug message")
-	golog.Info("info message")
-
-	golog.SetLevel(golog.InfoLevel)
-
-	golog.Debug("debug message")
-	golog.Info("info message")
-
-	golog.Infow("info kvs", "hello", "world")
+	for i := 0; i < 10000; i++ {
+		golog.Info("info message")
+		golog.Infow("info kvs", "hello", "world")
+	}
+	
+	ctx := golog.ContextWithTraceID(context.Background(), "trace-demo")
+	golog.InfowCtx(ctx, "request handled", "status", 200)
 }

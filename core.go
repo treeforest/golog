@@ -7,9 +7,17 @@ import (
 	"os"
 	"time"
 
-	rotatelogs "github.com/lestrrat-go/file-rotatelogs"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+)
+
+// sinkKind 标识日志输出目标类型，用于选择不同的编码策略
+type sinkKind int
+
+const (
+	sinkFile    sinkKind = iota // 文件输出（纯文本，无 ANSI）
+	sinkConsole                 // 控制台输出（可彩色级别）
+	sinkExtra                   // 额外 io.Writer（与文件侧编码一致）
 )
 
 // noopSyncWriter 是对 zapcore.WriteSyncer 的装饰器实现
@@ -28,154 +36,167 @@ func (n *noopSyncWriter) Sync() error {
 	return nil
 }
 
+// NewLogger 根据配置创建 Logger，可附加自定义 io.Writer 作为额外输出
 func NewLogger(logConfig *Config, writer ...io.Writer) Logger {
 	if logConfig == nil {
 		logConfig = defaultConfig()
 	}
-	sugaredLogger, aLevel := initSugarLogger(logConfig, writer...)
+	zapLogger, aLevel, rotWriter := initZapLogger(logConfig, writer...)
 	return &coreLogger{
-		SugaredLogger: sugaredLogger,
+		SugaredLogger: zapLogger.Sugar(),
+		zapLogger:     zapLogger,
 		atomicLevel:   aLevel,
+		rotWriter:     rotWriter,
 	}
 }
 
-// initSugarLogger 初始化并返回一个日志记录器
-func initSugarLogger(logConfig *Config, writer ...io.Writer) (*zap.SugaredLogger, zap.AtomicLevel) {
-	logLevel := logConfig.Level.ZapLevel()
-
+// initZapLogger 初始化 zap.Logger 及原子级别控制器
+func initZapLogger(logConfig *Config, writer ...io.Writer) (*zap.Logger, zap.AtomicLevel, *rotatingWriter) {
 	aLevel := zap.NewAtomicLevel()
-	aLevel.SetLevel(logLevel)
+	aLevel.SetLevel(logConfig.Level.ZapLevel())
 
-	sugaredLogger := newZapLogger(logConfig, aLevel, writer...).Sugar()
-	return sugaredLogger, aLevel
+	zapLogger, rotWriter := newZapLogger(logConfig, aLevel, writer...)
+	return zapLogger, aLevel, rotWriter
 }
 
-// newZapLogger 创建日志记录器
-func newZapLogger(logConfig *Config, level zap.AtomicLevel, writer ...io.Writer) *zap.Logger {
-	// 配置多路输出
-	var syncers []zapcore.WriteSyncer
+// newZapLogger 创建底层 zap.Logger，按配置组装 Tee Core（文件 / 控制台 / 额外输出）
+func newZapLogger(logConfig *Config, level zap.AtomicLevel, writer ...io.Writer) (*zap.Logger, *rotatingWriter) {
+	var cores []zapcore.Core
+	var rotWriter *rotatingWriter
+
 	if logConfig.LogInFile {
-		// 初始化日志滚动钩子
-		hook, err := getHook(logConfig.Path, logConfig.MaxAgeDays, logConfig.RotationHours, logConfig.RotationSizeMB)
+		rw, err := newRotatingWriter(logConfig)
 		if err != nil {
-			log.Fatalf("new zap logger get hook failed, %s", err)
+			log.Fatalf("new zap logger create rotating writer failed: %s", err)
 		}
-		syncers = append(syncers, zapcore.AddSync(hook)) // 日志文件输出
-	}
-	if logConfig.LogInConsole {
-		syncers = append(syncers, zapcore.AddSync(&noopSyncWriter{os.Stderr})) // 控制台输出
-	}
-	// 添加额外输出目标
-	for _, outSyncer := range writer {
-		syncers = append(syncers, zapcore.AddSync(outSyncer))
+		rotWriter = rw
+		cores = append(cores, buildCore(logConfig, level, zapcore.AddSync(rw), sinkFile))
 	}
 
-	if len(syncers) == 0 {
+	if logConfig.LogInConsole {
+		cores = append(cores, buildCore(logConfig, level, &noopSyncWriter{WriteSyncer: zapcore.AddSync(os.Stderr)}, sinkConsole))
+	}
+
+	for _, w := range writer {
+		cores = append(cores, buildCore(logConfig, level, zapcore.AddSync(w), sinkExtra))
+	}
+
+	if len(cores) == 0 {
 		log.Fatal("no log output target")
 	}
 
-	// 创建多路同步器
-	var syncer zapcore.WriteSyncer
-	syncer = zapcore.NewMultiWriteSyncer(syncers...)
-
-	// 构建编码器配置
-	var encoderConfig zapcore.EncoderConfig
-	if logConfig.IsBrief {
-		encoderConfig = zapcore.EncoderConfig{
-			TimeKey:    "time",
-			MessageKey: "msg",
-			EncodeTime: customTimeEncoder,
-			LineEnding: zapcore.DefaultLineEnding,
-		}
+	var core zapcore.Core
+	if len(cores) == 1 {
+		core = cores[0]
 	} else {
-		encoderConfig = zapcore.EncoderConfig{
-			TimeKey:        "time",
-			LevelKey:       "level",
-			NameKey:        "logger",
-			CallerKey:      "line",
-			MessageKey:     "msg",
-			StacktraceKey:  "stacktrace",
-			LineEnding:     zapcore.DefaultLineEnding,
-			EncodeLevel:    customLevelEncoder,
-			EncodeTime:     customTimeEncoder,
-			EncodeDuration: zapcore.SecondsDurationEncoder,
-			EncodeCaller:   zapcore.ShortCallerEncoder,
-			EncodeName:     zapcore.FullNameEncoder,
-		}
+		core = zapcore.NewTee(cores...)
 	}
 
-	// 创建编码器（JSON或Console格式）
-	var encoder zapcore.Encoder
-	if logConfig.JsonFormat {
-		encoder = zapcore.NewJSONEncoder(encoderConfig)
-	} else {
-		encoder = zapcore.NewConsoleEncoder(encoderConfig)
-	}
-
-	// 创建核心日志器
-	core := zapcore.NewCore(
-		encoder,
-		syncer,
-		level,
-	)
-
-	// 构造组件名称显示格式
-	componentName := fmt.Sprintf("@%s", logConfig.Component)
-	if logConfig.ShowColor {
-		componentName = getColorServiceName(componentName)
-	}
-
-	// 组装完整记录器名称
-	var name string
-	if logConfig.Component != "" {
-		name = fmt.Sprintf("%s %s", logConfig.Module, componentName)
-	} else {
-		name = logConfig.Module
-	}
-
-	// 创建基础日志器
+	name := loggerName(logConfig)
 	logger := zap.New(core).Named(name)
 
-	// 添加调用位置显示
 	if logConfig.ShowLine {
 		logger = logger.WithOptions(zap.AddCaller())
 	}
-
-	// 配置堆栈追踪级别
 	if lvl := logConfig.StackTraceLevel.ZapLevel(); lvl != zapcore.InvalidLevel {
 		logger = logger.WithOptions(zap.AddStacktrace(lvl))
 	}
 
-	return logger
+	return logger, rotWriter
 }
 
-// getHook 创建日志滚动处理器
-func getHook(filename string, maxAgeDays, rotationHours int, rotationSizeMB int64) (io.Writer, error) {
-	var opts []rotatelogs.Option
-	opts = append(opts, rotatelogs.WithLinkName(filename))
-	if rotationHours > 0 {
-		opts = append(opts, rotatelogs.WithRotationTime(time.Hour*time.Duration(rotationHours)))
+// loggerName 组装纯文本 logger 名称（不含 ANSI 颜色码）
+func loggerName(cfg *Config) string {
+	if cfg.Component != "" {
+		return fmt.Sprintf("%s @%s", cfg.Module, cfg.Component)
 	}
-	if rotationSizeMB > 0 {
-		opts = append(opts, rotatelogs.WithRotationSize(rotationSizeMB*1024*1024))
-	}
-	if maxAgeDays > 0 {
-		opts = append(opts, rotatelogs.WithMaxAge(time.Hour*24*time.Duration(maxAgeDays)))
-	}
-
-	hook, err := rotatelogs.New(filename+".%Y%m%d%H", opts...)
-	if err != nil {
-		return nil, err
-	}
-	return hook, nil
+	return cfg.Module
 }
 
-// customLevelEncoder 自定义日志级别显示格式
-func customLevelEncoder(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
-	enc.AppendString("[" + level.CapitalString() + "]") // 格式示例：[INFO]
+// buildCore 为指定输出目标构建 zapcore.Core（含可选采样）
+func buildCore(cfg *Config, level zap.AtomicLevel, ws zapcore.WriteSyncer, kind sinkKind) zapcore.Core {
+	enc := newEncoder(cfg, kind)
+	core := zapcore.NewCore(enc, ws, level)
+	core = wrapSampling(cfg, core)
+	return core
 }
 
-// customTimeEncoder 自定义时间显示格式
-func customTimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
-	enc.AppendString(t.Format("2006-01-02 15:04:05.000")) // 精确到毫秒的时间格式
+// wrapSampling 按配置包裹采样 Core
+func wrapSampling(cfg *Config, core zapcore.Core) zapcore.Core {
+	if !cfg.Sampling.Enabled {
+		return core
+	}
+	initial := cfg.Sampling.Initial
+	if initial <= 0 {
+		initial = defaultSamplingInitial
+	}
+	thereafter := cfg.Sampling.Thereafter
+	if thereafter <= 0 {
+		thereafter = defaultSamplingThereafter
+	}
+	return zapcore.NewSamplerWithOptions(core, time.Second, initial, thereafter)
+}
+
+// newEncoder 根据格式与输出目标创建编码器
+func newEncoder(cfg *Config, kind sinkKind) zapcore.Encoder {
+	encCfg := encoderConfig(cfg, kind)
+	if cfg.JsonFormat {
+		return zapcore.NewJSONEncoder(encCfg)
+	}
+	return zapcore.NewConsoleEncoder(encCfg)
+}
+
+// encoderConfig 构建编码器配置（文件与控制台可不同）
+func encoderConfig(cfg *Config, kind sinkKind) zapcore.EncoderConfig {
+	if cfg.IsBrief {
+		return zapcore.EncoderConfig{
+			TimeKey:    "time",
+			MessageKey: "msg",
+			EncodeTime: encodeTimeForSink(cfg, kind),
+			LineEnding: zapcore.DefaultLineEnding,
+		}
+	}
+
+	levelEnc := zapcore.CapitalLevelEncoder
+	if kind == sinkConsole && cfg.ShowColor {
+		levelEnc = colorLevelEncoder
+	}
+
+	return zapcore.EncoderConfig{
+		TimeKey:        "time",
+		LevelKey:       "level",
+		NameKey:        "logger",
+		CallerKey:      "line",
+		MessageKey:     "msg",
+		StacktraceKey:  "stacktrace",
+		LineEnding:     zapcore.DefaultLineEnding,
+		EncodeLevel:    levelEnc,
+		EncodeTime:     encodeTimeForSink(cfg, kind),
+		EncodeDuration: zapcore.SecondsDurationEncoder,
+		EncodeCaller:   zapcore.ShortCallerEncoder,
+		EncodeName:     zapcore.FullNameEncoder,
+	}
+}
+
+// encodeTimeForSink 按输出格式选择时间编码器
+func encodeTimeForSink(cfg *Config, kind sinkKind) zapcore.TimeEncoder {
+	if cfg.JsonFormat {
+		return rfc3339TimeEncoder(cfg.UseUTC)
+	}
+	return consoleTimeEncoder
+}
+
+// consoleTimeEncoder 控制台/文本格式时间：本地时间，精确到毫秒
+func consoleTimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
+	enc.AppendString(t.Local().Format("2006-01-02 15:04:05.000"))
+}
+
+// rfc3339TimeEncoder JSON 格式时间：RFC3339Nano，可选 UTC
+func rfc3339TimeEncoder(useUTC bool) zapcore.TimeEncoder {
+	return func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
+		if useUTC {
+			t = t.UTC()
+		}
+		enc.AppendString(t.Format(time.RFC3339Nano))
+	}
 }
