@@ -51,6 +51,8 @@ func withContextFields(l Logger, ctx context.Context) Logger {
 		SugaredLogger: zl.Sugar(),
 		zapLogger:     zl,
 		atomicLevel:   cl.atomicLevel,
+		rotWriter:     cl.rotWriter,
+		ownsWriter:    false, // Context 派生不取得所有权
 	}
 }
 

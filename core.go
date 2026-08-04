@@ -3,7 +3,6 @@ package golog
 import (
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"time"
 
@@ -36,41 +35,65 @@ func (n *noopSyncWriter) Sync() error {
 	return nil
 }
 
-// NewLogger 根据配置创建 Logger，可附加自定义 io.Writer 作为额外输出
-func NewLogger(logConfig *Config, writer ...io.Writer) Logger {
+// NewLogger 根据配置创建 Logger，可附加自定义 io.Writer 作为额外输出。
+// 调用方在进程退出前应对返回的 Logger 调用 Close（若未将所有权交给 SetDefaultLogger）。
+func NewLogger(logConfig *Config, writer ...io.Writer) (Logger, error) {
 	if logConfig == nil {
 		logConfig = defaultConfig()
 	}
-	zapLogger, aLevel, rotWriter := initZapLogger(logConfig, writer...)
+	zapLogger, aLevel, rotWriter, err := initZapLogger(logConfig, writer...)
+	if err != nil {
+		return nil, err
+	}
 	return &coreLogger{
 		SugaredLogger: zapLogger.Sugar(),
 		zapLogger:     zapLogger,
 		atomicLevel:   aLevel,
 		rotWriter:     rotWriter,
+		ownsWriter:    rotWriter != nil,
+	}, nil
+}
+
+// MustNewLogger 同 NewLogger，失败时 Fatal
+func MustNewLogger(logConfig *Config, writer ...io.Writer) Logger {
+	l, err := NewLogger(logConfig, writer...)
+	if err != nil {
+		logFatalf("golog: create logger failed: %v", err)
 	}
+	return l
+}
+
+// logFatalf 可在测试中替换
+var logFatalf = func(format string, args ...interface{}) {
+	_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
+	os.Exit(1)
 }
 
 // initZapLogger 初始化 zap.Logger 及原子级别控制器
-func initZapLogger(logConfig *Config, writer ...io.Writer) (*zap.Logger, zap.AtomicLevel, *rotatingWriter) {
+func initZapLogger(logConfig *Config, writer ...io.Writer) (*zap.Logger, zap.AtomicLevel, *rotatingWriter, error) {
 	aLevel := zap.NewAtomicLevel()
 	aLevel.SetLevel(logConfig.Level.ZapLevel())
 
-	zapLogger, rotWriter := newZapLogger(logConfig, aLevel, writer...)
-	return zapLogger, aLevel, rotWriter
+	zapLogger, rotWriter, err := newZapLogger(logConfig, aLevel, writer...)
+	if err != nil {
+		return nil, aLevel, nil, err
+	}
+	return zapLogger, aLevel, rotWriter, nil
 }
 
 // newZapLogger 创建底层 zap.Logger，按配置组装 Tee Core（文件 / 控制台 / 额外输出）
-func newZapLogger(logConfig *Config, level zap.AtomicLevel, writer ...io.Writer) (*zap.Logger, *rotatingWriter) {
+func newZapLogger(logConfig *Config, level zap.AtomicLevel, writer ...io.Writer) (*zap.Logger, *rotatingWriter, error) {
 	var cores []zapcore.Core
 	var rotWriter *rotatingWriter
 
 	if logConfig.LogInFile {
-		rw, err := newRotatingWriter(logConfig)
+		rw, err := getRotatingWriter(logConfig)
 		if err != nil {
-			log.Fatalf("new zap logger create rotating writer failed: %s", err)
+			return nil, nil, fmt.Errorf("create rotating writer: %w", err)
 		}
 		rotWriter = rw
-		cores = append(cores, buildCore(logConfig, level, zapcore.AddSync(rw), sinkFile))
+		// rotatingWriter 嵌入 timberjack，已实现 zapcore.WriteSyncer
+		cores = append(cores, buildCore(logConfig, level, rw, sinkFile))
 	}
 
 	if logConfig.LogInConsole {
@@ -82,7 +105,7 @@ func newZapLogger(logConfig *Config, level zap.AtomicLevel, writer ...io.Writer)
 	}
 
 	if len(cores) == 0 {
-		log.Fatal("no log output target")
+		return nil, nil, fmt.Errorf("no log output target")
 	}
 
 	var core zapcore.Core
@@ -91,6 +114,8 @@ func newZapLogger(logConfig *Config, level zap.AtomicLevel, writer ...io.Writer)
 	} else {
 		core = zapcore.NewTee(cores...)
 	}
+	// 采样包在 Tee 外层，保证多 sink 采样一致
+	core = wrapSampling(logConfig, core)
 
 	name := loggerName(logConfig)
 	logger := zap.New(core).Named(name)
@@ -102,7 +127,7 @@ func newZapLogger(logConfig *Config, level zap.AtomicLevel, writer ...io.Writer)
 		logger = logger.WithOptions(zap.AddStacktrace(lvl))
 	}
 
-	return logger, rotWriter
+	return logger, rotWriter, nil
 }
 
 // loggerName 组装纯文本 logger 名称（不含 ANSI 颜色码）
@@ -113,12 +138,10 @@ func loggerName(cfg *Config) string {
 	return cfg.Module
 }
 
-// buildCore 为指定输出目标构建 zapcore.Core（含可选采样）
+// buildCore 为指定输出目标构建 zapcore.Core（采样在 Tee 之后统一包裹）
 func buildCore(cfg *Config, level zap.AtomicLevel, ws zapcore.WriteSyncer, kind sinkKind) zapcore.Core {
 	enc := newEncoder(cfg, kind)
-	core := zapcore.NewCore(enc, ws, level)
-	core = wrapSampling(cfg, core)
-	return core
+	return zapcore.NewCore(enc, ws, level)
 }
 
 // wrapSampling 按配置包裹采样 Core
@@ -152,7 +175,7 @@ func encoderConfig(cfg *Config, kind sinkKind) zapcore.EncoderConfig {
 		return zapcore.EncoderConfig{
 			TimeKey:    "time",
 			MessageKey: "msg",
-			EncodeTime: encodeTimeForSink(cfg, kind),
+			EncodeTime: encodeTimeForSink(cfg),
 			LineEnding: zapcore.DefaultLineEnding,
 		}
 	}
@@ -171,7 +194,7 @@ func encoderConfig(cfg *Config, kind sinkKind) zapcore.EncoderConfig {
 		StacktraceKey:  "stacktrace",
 		LineEnding:     zapcore.DefaultLineEnding,
 		EncodeLevel:    levelEnc,
-		EncodeTime:     encodeTimeForSink(cfg, kind),
+		EncodeTime:     encodeTimeForSink(cfg),
 		EncodeDuration: zapcore.SecondsDurationEncoder,
 		EncodeCaller:   zapcore.ShortCallerEncoder,
 		EncodeName:     zapcore.FullNameEncoder,
@@ -179,7 +202,7 @@ func encoderConfig(cfg *Config, kind sinkKind) zapcore.EncoderConfig {
 }
 
 // encodeTimeForSink 按输出格式选择时间编码器
-func encodeTimeForSink(cfg *Config, kind sinkKind) zapcore.TimeEncoder {
+func encodeTimeForSink(cfg *Config) zapcore.TimeEncoder {
 	if cfg.JsonFormat {
 		return rfc3339TimeEncoder(cfg.UseUTC)
 	}

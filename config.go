@@ -24,7 +24,7 @@ type Config struct {
 	Level           Level          // 日志级别（DebugLevel/InfoLevel/WarnLevel/ErrorLevel/FatalLevel）
 	MaxAgeDays      int            // 日志文件最长保留天数（超过将自动删除）
 	MaxBackups      int            // 最多保留备份文件个数（0 表示仅按 MaxAgeDays 清理）
-	RotationHours   int            // 日志滚动时间间隔（小时），定时调用 lumberjack.Rotate
+	RotationHours   int            // 日志滚动时间间隔（小时），映射为 timberjack RotationInterval；0 禁用
 	RotationSizeMB  int64          // 日志滚动大小阈值（单位：MB）
 	Compress        bool           // 是否对轮转后的旧日志进行 gzip 压缩
 	JsonFormat      bool           // 是否使用 JSON 格式输出日志
@@ -116,7 +116,7 @@ func WithMaxBackups(backups int) Option {
 	}
 }
 
-// WithRotationHours 设置按时间轮转的间隔（小时）
+// WithRotationHours 设置按时间轮转的间隔（小时）；0 表示禁用定时轮转
 func WithRotationHours(hours int) Option {
 	return func(c *Config) {
 		c.RotationHours = hours
