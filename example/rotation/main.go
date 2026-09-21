@@ -1,7 +1,9 @@
+// 压测按大小轮转：并发写入约数 MB，验证生成多个备份文件。
 package main
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -13,15 +15,23 @@ import (
 	"github.com/treeforest/golog/v2"
 )
 
-// 压测按大小轮转：并发写入约数 MB，验证生成多个备份文件。
-//
 // 预期：
 //   - 活动文件：rotation.log
 //   - 备份：rotation.log-YYYYMMDDHHmmss-size（本地时区）
 func main() {
+	os.Exit(run())
+}
+
+func run() int {
 	dir := "./logs/rotation"
-	_ = os.RemoveAll(dir)
-	_ = os.MkdirAll(dir, 0o755)
+	if err := os.RemoveAll(dir); err != nil {
+		log.Printf("remove dir: %v", err)
+		return 1
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		log.Printf("mkdir: %v", err)
+		return 1
+	}
 	logPath := filepath.Join(dir, "rotation.log")
 
 	cfg := golog.NewConfig(
@@ -37,7 +47,11 @@ func main() {
 		golog.WithMaxAgeDays(1),
 	)
 	golog.SetDefaultLogger(golog.MustNewLogger(cfg))
-	defer func() { _ = golog.Close() }()
+	defer func() {
+		if err := golog.Close(); err != nil {
+			log.Printf("close default logger: %v", err)
+		}
+	}()
 
 	const (
 		workers   = 8
@@ -49,22 +63,26 @@ func main() {
 	var written atomic.Int64
 	var wg sync.WaitGroup
 	wg.Add(workers)
-	for w := 0; w < workers; w++ {
+	for w := range workers {
 		go func(id int) {
 			defer wg.Done()
-			for i := 0; i < perWorker; i++ {
+			for i := range perWorker {
 				golog.Infof("w=%d i=%d pad=%s", id, i, payload)
 				written.Add(1)
 			}
 		}(w)
 	}
 	wg.Wait()
-	_ = golog.Sync()
+	if err := golog.Sync(); err != nil {
+		log.Printf("sync: %v", err)
+		return 1
+	}
 	elapsed := time.Since(start)
 
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		panic(err)
+		log.Printf("readdir: %v", err)
+		return 1
 	}
 
 	type fileInfo struct {
@@ -108,11 +126,12 @@ func main() {
 
 	if !hasActive {
 		fmt.Println("FAIL: missing active rotation.log")
-		os.Exit(1)
+		return 1
 	}
 	if backups < 2 {
 		fmt.Printf("FAIL: expected >=2 size backups, got %d\n", backups)
-		os.Exit(1)
+		return 1
 	}
 	fmt.Println("OK: rotation naming and multi-file output look correct")
+	return 0
 }

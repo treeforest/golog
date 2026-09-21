@@ -64,7 +64,7 @@ func MustNewLogger(logConfig *Config, writer ...io.Writer) Logger {
 }
 
 // logFatalf 可在测试中替换
-var logFatalf = func(format string, args ...interface{}) {
+var logFatalf = func(format string, args ...any) {
 	_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
 }

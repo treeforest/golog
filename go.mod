@@ -1,8 +1,6 @@
 module github.com/treeforest/golog/v2
 
-go 1.21
-
-toolchain go1.22.12
+go 1.25.13
 
 require (
 	github.com/DeRuina/timberjack v1.4.6

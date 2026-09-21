@@ -1,11 +1,19 @@
+// 基础用法：控制台输出、动态级别、独立 Logger 实例。
 package main
 
 import (
+	"log"
+
 	"github.com/treeforest/golog/v2"
 )
 
-// 基础用法：控制台输出、动态级别、独立 Logger 实例
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	cfg := golog.NewConfig(
 		golog.WithModule("demo"),
 		golog.WithLogInConsole(true),
@@ -13,7 +21,11 @@ func main() {
 		golog.WithLevel(golog.DebugLevel),
 	)
 	golog.SetDefaultLogger(golog.MustNewLogger(cfg))
-	defer func() { _ = golog.Close() }()
+	defer func() {
+		if err := golog.Close(); err != nil {
+			log.Printf("close default logger: %v", err)
+		}
+	}()
 
 	golog.Debug("debug message")
 	golog.Info("info message")
@@ -31,6 +43,11 @@ func main() {
 		golog.WithLogInConsole(true),
 		golog.WithShowColor(false),
 	))
-	defer func() { _ = local.Close() }()
+	defer func() {
+		if err := local.Close(); err != nil {
+			log.Printf("close local logger: %v", err)
+		}
+	}()
 	local.Debug("local logger debug")
+	return nil
 }

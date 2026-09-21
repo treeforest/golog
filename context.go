@@ -68,63 +68,78 @@ func contextFields(ctx context.Context) []zap.Field {
 	return fields
 }
 
-func DebugCtx(ctx context.Context, args ...interface{}) {
+// DebugCtx logs a debug message from the context logger.
+func DebugCtx(ctx context.Context, args ...any) {
 	LoggerFromContext(ctx).Debug(args...)
 }
 
-func DebugfCtx(ctx context.Context, format string, args ...interface{}) {
+// DebugfCtx logs a formatted debug message from the context logger.
+func DebugfCtx(ctx context.Context, format string, args ...any) {
 	LoggerFromContext(ctx).Debugf(format, args...)
 }
 
-func DebugwCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {
+// DebugwCtx logs a structured debug message from the context logger.
+func DebugwCtx(ctx context.Context, msg string, keysAndValues ...any) {
 	LoggerFromContext(ctx).Debugw(msg, keysAndValues...)
 }
 
-func InfoCtx(ctx context.Context, args ...interface{}) {
+// InfoCtx logs an info message from the context logger.
+func InfoCtx(ctx context.Context, args ...any) {
 	LoggerFromContext(ctx).Info(args...)
 }
 
-func InfofCtx(ctx context.Context, format string, args ...interface{}) {
+// InfofCtx logs a formatted info message from the context logger.
+func InfofCtx(ctx context.Context, format string, args ...any) {
 	LoggerFromContext(ctx).Infof(format, args...)
 }
 
-func InfowCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {
+// InfowCtx logs a structured info message from the context logger.
+func InfowCtx(ctx context.Context, msg string, keysAndValues ...any) {
 	LoggerFromContext(ctx).Infow(msg, keysAndValues...)
 }
 
-func WarnCtx(ctx context.Context, args ...interface{}) {
+// WarnCtx logs a warning message from the context logger.
+func WarnCtx(ctx context.Context, args ...any) {
 	LoggerFromContext(ctx).Warn(args...)
 }
 
-func WarnfCtx(ctx context.Context, format string, args ...interface{}) {
+// WarnfCtx logs a formatted warning message from the context logger.
+func WarnfCtx(ctx context.Context, format string, args ...any) {
 	LoggerFromContext(ctx).Warnf(format, args...)
 }
 
-func WarnwCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {
+// WarnwCtx logs a structured warning message from the context logger.
+func WarnwCtx(ctx context.Context, msg string, keysAndValues ...any) {
 	LoggerFromContext(ctx).Warnw(msg, keysAndValues...)
 }
 
-func ErrorCtx(ctx context.Context, args ...interface{}) {
+// ErrorCtx logs an error message from the context logger.
+func ErrorCtx(ctx context.Context, args ...any) {
 	LoggerFromContext(ctx).Error(args...)
 }
 
-func ErrorfCtx(ctx context.Context, format string, args ...interface{}) {
+// ErrorfCtx logs a formatted error message from the context logger.
+func ErrorfCtx(ctx context.Context, format string, args ...any) {
 	LoggerFromContext(ctx).Errorf(format, args...)
 }
 
-func ErrorwCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {
+// ErrorwCtx logs a structured error message from the context logger.
+func ErrorwCtx(ctx context.Context, msg string, keysAndValues ...any) {
 	LoggerFromContext(ctx).Errorw(msg, keysAndValues...)
 }
 
-func FatalCtx(ctx context.Context, args ...interface{}) {
+// FatalCtx logs a fatal message from the context logger and exits.
+func FatalCtx(ctx context.Context, args ...any) {
 	LoggerFromContext(ctx).Fatal(args...)
 }
 
-func FatalfCtx(ctx context.Context, format string, args ...interface{}) {
+// FatalfCtx logs a formatted fatal message from the context logger and exits.
+func FatalfCtx(ctx context.Context, format string, args ...any) {
 	LoggerFromContext(ctx).Fatalf(format, args...)
 }
 
-func FatalwCtx(ctx context.Context, msg string, keysAndValues ...interface{}) {
+// FatalwCtx logs a structured fatal message from the context logger and exits.
+func FatalwCtx(ctx context.Context, msg string, keysAndValues ...any) {
 	LoggerFromContext(ctx).Fatalw(msg, keysAndValues...)
 }
 

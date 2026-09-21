@@ -1,6 +1,8 @@
 package golog
 
 import (
+	"fmt"
+	"os"
 	"sync"
 
 	"go.uber.org/zap"
@@ -8,25 +10,25 @@ import (
 
 // Logger 接口定义
 type Logger interface {
-	Debug(args ...interface{})
-	Debugf(format string, args ...interface{})
-	Debugw(msg string, keysAndValues ...interface{})
+	Debug(args ...any)
+	Debugf(format string, args ...any)
+	Debugw(msg string, keysAndValues ...any)
 
-	Info(args ...interface{})
-	Infof(format string, args ...interface{})
-	Infow(msg string, keysAndValues ...interface{})
+	Info(args ...any)
+	Infof(format string, args ...any)
+	Infow(msg string, keysAndValues ...any)
 
-	Warn(args ...interface{})
-	Warnf(format string, args ...interface{})
-	Warnw(msg string, keysAndValues ...interface{})
+	Warn(args ...any)
+	Warnf(format string, args ...any)
+	Warnw(msg string, keysAndValues ...any)
 
-	Error(args ...interface{})
-	Errorf(format string, args ...interface{})
-	Errorw(msg string, keysAndValues ...interface{})
+	Error(args ...any)
+	Errorf(format string, args ...any)
+	Errorw(msg string, keysAndValues ...any)
 
-	Fatal(args ...interface{})
-	Fatalf(format string, args ...interface{})
-	Fatalw(msg string, keysAndValues ...interface{})
+	Fatal(args ...any)
+	Fatalf(format string, args ...any)
+	Fatalw(msg string, keysAndValues ...any)
 
 	AddCallerSkip(skip int)
 	SetLevel(lvl Level)
@@ -60,7 +62,10 @@ func (l *coreLogger) SetLevel(lvl Level) {
 }
 
 func (l *coreLogger) GetLevel() Level {
-	lvl, _ := ParseLevel(l.atomicLevel.Level().String())
+	lvl, err := ParseLevel(l.atomicLevel.Level().String())
+	if err != nil {
+		return InfoLevel
+	}
 	return lvl
 }
 
@@ -143,9 +148,16 @@ func getDefault() Logger {
 			return
 		}
 		root := MustNewLogger(defaultConfig())
-		cloned := root.Clone().(*coreLogger)
-		transferOwnership(root.(*coreLogger), cloned)
-		defaultLogger = cloned
+		rootCore, ok := root.(*coreLogger)
+		if !ok {
+			panic("golog: internal error: root logger is not *coreLogger")
+		}
+		clonedCore, ok := root.Clone().(*coreLogger)
+		if !ok {
+			panic("golog: internal error: cloned logger is not *coreLogger")
+		}
+		transferOwnership(rootCore, clonedCore)
+		defaultLogger = clonedCore
 	})
 	defaultMu.RLock()
 	defer defaultMu.RUnlock()
@@ -168,78 +180,98 @@ func SetDefaultLogger(logger Logger) {
 	defaultMu.Unlock()
 
 	if prev != nil {
-		_ = prev.Close()
+		if err := prev.Close(); err != nil {
+			_, _ = fmt.Fprintf(os.Stderr, "golog: close previous default logger: %v\n", err)
+		}
 	}
 }
 
-func Debug(args ...interface{}) {
+// Debug logs a debug message using the default logger.
+func Debug(args ...any) {
 	getDefault().Debug(args...)
 }
 
-func Debugf(format string, args ...interface{}) {
+// Debugf logs a formatted debug message using the default logger.
+func Debugf(format string, args ...any) {
 	getDefault().Debugf(format, args...)
 }
 
-func Debugw(msg string, keysAndValues ...interface{}) {
+// Debugw logs a structured debug message using the default logger.
+func Debugw(msg string, keysAndValues ...any) {
 	getDefault().Debugw(msg, keysAndValues...)
 }
 
-func Info(args ...interface{}) {
+// Info logs an info message using the default logger.
+func Info(args ...any) {
 	getDefault().Info(args...)
 }
 
-func Infof(format string, args ...interface{}) {
+// Infof logs a formatted info message using the default logger.
+func Infof(format string, args ...any) {
 	getDefault().Infof(format, args...)
 }
 
-func Infow(msg string, keysAndValues ...interface{}) {
+// Infow logs a structured info message using the default logger.
+func Infow(msg string, keysAndValues ...any) {
 	getDefault().Infow(msg, keysAndValues...)
 }
 
-func Warn(args ...interface{}) {
+// Warn logs a warning message using the default logger.
+func Warn(args ...any) {
 	getDefault().Warn(args...)
 }
 
-func Warnf(format string, args ...interface{}) {
+// Warnf logs a formatted warning message using the default logger.
+func Warnf(format string, args ...any) {
 	getDefault().Warnf(format, args...)
 }
 
-func Warnw(msg string, keysAndValues ...interface{}) {
+// Warnw logs a structured warning message using the default logger.
+func Warnw(msg string, keysAndValues ...any) {
 	getDefault().Warnw(msg, keysAndValues...)
 }
 
-func Error(args ...interface{}) {
+// Error logs an error message using the default logger.
+func Error(args ...any) {
 	getDefault().Error(args...)
 }
 
-func Errorf(format string, args ...interface{}) {
+// Errorf logs a formatted error message using the default logger.
+func Errorf(format string, args ...any) {
 	getDefault().Errorf(format, args...)
 }
 
-func Errorw(msg string, keysAndValues ...interface{}) {
+// Errorw logs a structured error message using the default logger.
+func Errorw(msg string, keysAndValues ...any) {
 	getDefault().Errorw(msg, keysAndValues...)
 }
 
-func Fatal(args ...interface{}) {
+// Fatal logs a fatal message using the default logger and exits.
+func Fatal(args ...any) {
 	getDefault().Fatal(args...)
 }
 
-func Fatalf(format string, args ...interface{}) {
+// Fatalf logs a formatted fatal message using the default logger and exits.
+func Fatalf(format string, args ...any) {
 	getDefault().Fatalf(format, args...)
 }
 
-func Fatalw(msg string, keysAndValues ...interface{}) {
+// Fatalw logs a structured fatal message using the default logger and exits.
+func Fatalw(msg string, keysAndValues ...any) {
 	getDefault().Fatalw(msg, keysAndValues...)
 }
 
+// SetLevel sets the log level on the default logger.
 func SetLevel(lvl Level) {
 	getDefault().SetLevel(lvl)
 }
 
+// GetLevel returns the current log level of the default logger.
 func GetLevel() Level {
 	return getDefault().GetLevel()
 }
 
+// AddCallerSkip increases caller skip on the default logger.
 func AddCallerSkip(skip int) {
 	getDefault().AddCallerSkip(skip)
 }

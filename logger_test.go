@@ -21,7 +21,20 @@ func mustNew(t *testing.T, cfg *Config) Logger {
 	t.Helper()
 	l, err := NewLogger(cfg)
 	require.NoError(t, err)
+	closeLogger(t, l)
 	return l
+}
+
+func closeLogger(t *testing.T, l Logger) {
+	t.Helper()
+	t.Cleanup(func() { require.NoError(t, l.Close()) })
+}
+
+func mustCoreLogger(t *testing.T, l Logger) *coreLogger {
+	t.Helper()
+	cl, ok := l.(*coreLogger)
+	require.True(t, ok)
+	return cl
 }
 
 func TestBasicLogging(t *testing.T) {
@@ -41,7 +54,6 @@ func TestBasicLogging(t *testing.T) {
 	)
 
 	logger := mustNew(t, config)
-	defer func() { _ = logger.Close() }()
 
 	logger.Debug("这应该不会出现")
 	logger.Info("测试信息")
@@ -51,8 +63,7 @@ func TestBasicLogging(t *testing.T) {
 	_, err := os.Stat(logPath)
 	require.NoError(t, err)
 
-	content, err := os.ReadFile(logPath)
-	require.NoError(t, err)
+	content := readLogFile(t, logPath)
 	logOutput := string(content)
 
 	assert.NotContains(t, logOutput, "这应该不会出现")
@@ -76,12 +87,10 @@ func TestJSONFormat(t *testing.T) {
 	)
 
 	logger := mustNew(t, config)
-	defer func() { _ = logger.Close() }()
 
 	logger.Infow("JSON测试", "key", "value")
 
-	content, err := os.ReadFile(logPath)
-	require.NoError(t, err)
+	content := readLogFile(t, logPath)
 	assert.Contains(t, string(content), `"level":"INFO"`)
 	assert.Contains(t, string(content), `"key":"value"`)
 }
@@ -100,10 +109,9 @@ func TestSizeBasedRotation(t *testing.T) {
 	)
 
 	logger := mustNew(t, config)
-	defer func() { _ = logger.Close() }()
 
 	const chunk = "ABCDEFGHIJ"
-	for i := 0; i < 1024*103; i++ {
+	for range 1024 * 103 {
 		logger.Info(chunk)
 	}
 
@@ -132,24 +140,22 @@ func TestConcurrentLogging(t *testing.T) {
 		WithLogInConsole(false),
 	)
 	logger := mustNew(t, config)
-	defer func() { _ = logger.Close() }()
 
 	var wg sync.WaitGroup
 	const workers = 100
 
 	wg.Add(workers)
-	for i := 0; i < workers; i++ {
+	for i := range workers {
 		go func(id int) {
 			defer wg.Done()
-			for j := 0; j < 100; j++ {
+			for j := range 100 {
 				logger.Infof("Worker %d: %d", id, j)
 			}
 		}(i)
 	}
 	wg.Wait()
 
-	content, err := os.ReadFile(logPath)
-	require.NoError(t, err)
+	content := readLogFile(t, logPath)
 	lines := strings.Split(string(content), "\n")
 	assert.Greater(t, len(lines), workers*100-10)
 }
@@ -166,12 +172,10 @@ func TestStackTrace(t *testing.T) {
 	)
 
 	logger := mustNew(t, config)
-	defer func() { _ = logger.Close() }()
 
 	logger.Error("触发错误")
 
-	content, err := os.ReadFile(logPath)
-	require.NoError(t, err)
+	content := readLogFile(t, logPath)
 	assert.Contains(t, string(content), "testing.tRunner")
 }
 
@@ -195,20 +199,19 @@ func TestColorOutput(t *testing.T) {
 	)
 
 	logger := mustNew(t, config)
-	defer func() { _ = logger.Close() }()
 	done := make(chan struct{})
 	go func() {
-		_, _ = io.Copy(&stderrBuf, r)
+		_, err := io.Copy(&stderrBuf, r)
+		require.NoError(t, err)
 		close(done)
 	}()
 
 	logger.Info("带颜色信息")
-	_ = w.Close()
+	require.NoError(t, w.Close())
 	os.Stderr = origStderr
 	<-done
 
-	fileContent, err := os.ReadFile(logPath)
-	require.NoError(t, err)
+	fileContent := readLogFile(t, logPath)
 	assert.Contains(t, string(fileContent), "@color")
 	assert.NotContains(t, string(fileContent), "\033[")
 
@@ -229,7 +232,6 @@ func TestDynamicLevel(t *testing.T) {
 	)
 
 	logger := mustNew(t, config)
-	defer func() { _ = logger.Close() }()
 
 	logger.Debug("调试信息1")
 	content := readLogFile(t, logPath)
@@ -243,7 +245,7 @@ func TestDynamicLevel(t *testing.T) {
 
 func readLogFile(t *testing.T, path string) []byte {
 	t.Helper()
-	content, err := os.ReadFile(path)
+	content, err := os.ReadFile(path) // #nosec G304 -- path 来自 t.TempDir()
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -254,7 +256,6 @@ func readLogFile(t *testing.T, path string) []byte {
 func TestCloneDoesNotMutateOriginal(t *testing.T) {
 	config := NewConfig(WithLogInConsole(true), WithLogInFile(false))
 	original := mustNew(t, config)
-	defer func() { _ = original.Close() }()
 
 	_ = original.Clone()
 	original.Info("original caller")
@@ -279,16 +280,14 @@ func TestSampling(t *testing.T) {
 	)
 
 	logger := mustNew(t, config)
-	defer func() { _ = logger.Close() }()
 
 	const total = 5000
-	for i := 0; i < total; i++ {
+	for range total {
 		logger.Info("flood")
 	}
 	require.NoError(t, logger.Sync())
 
-	content, err := os.ReadFile(logPath)
-	require.NoError(t, err)
+	content := readLogFile(t, logPath)
 	lineCount := strings.Count(string(content), "flood")
 	assert.Less(t, lineCount, total/2, "采样后输出应明显少于调用次数")
 }
@@ -305,7 +304,6 @@ func TestContextTraceID(t *testing.T) {
 	)
 
 	logger := mustNew(t, config)
-	defer func() { _ = logger.Close() }()
 
 	ctx := ContextWithLogger(context.Background(), logger)
 	ctx = ContextWithTraceID(ctx, "trace-abc")
@@ -313,8 +311,7 @@ func TestContextTraceID(t *testing.T) {
 	InfowCtx(ctx, "ctx message", "k", "v")
 	require.NoError(t, logger.Sync())
 
-	content, err := os.ReadFile(logPath)
-	require.NoError(t, err)
+	content := readLogFile(t, logPath)
 	assert.Contains(t, string(content), `"trace_id":"trace-abc"`)
 	assert.Contains(t, string(content), `"request_id":"req-xyz"`)
 }
@@ -329,20 +326,18 @@ func TestSetDefaultLoggerPreservesFileOutput(t *testing.T) {
 		WithLogInConsole(false),
 	)
 	SetDefaultLogger(mustNew(t, cfg))
-	defer func() { _ = Close() }()
+	t.Cleanup(func() { require.NoError(t, Close()) })
 
 	Info("via global default")
 	require.NoError(t, Sync())
 
-	content, err := os.ReadFile(logPath)
-	require.NoError(t, err)
+	content := readLogFile(t, logPath)
 	assert.Contains(t, string(content), "via global default")
 }
 
 func TestLoggerZap(t *testing.T) {
 	config := NewConfig(WithLogInConsole(true), WithLogInFile(false))
 	logger := mustNew(t, config)
-	defer func() { _ = logger.Close() }()
 	zl := logger.Zap()
 	require.NotNil(t, zl)
 	zl.Info("typed", zap.String("k", "v"))
@@ -360,10 +355,9 @@ func TestBackupFilenameFormat(t *testing.T) {
 		WithRotationSizeMB(100),
 	)
 	logger := mustNew(t, cfg)
-	defer func() { _ = logger.Close() }()
 
 	logger.Info("before rotate")
-	cl := logger.(*coreLogger)
+	cl := mustCoreLogger(t, logger)
 	require.NotNil(t, cl.rotWriter)
 	require.NoError(t, cl.rotWriter.Rotate())
 
@@ -393,13 +387,9 @@ func TestSharedRotatingWriter(t *testing.T) {
 	)
 	l1 := mustNew(t, cfg)
 	l2 := mustNew(t, cfg)
-	defer func() {
-		_ = l1.Close()
-		_ = l2.Close()
-	}()
 
-	rw1 := l1.(*coreLogger).rotWriter
-	rw2 := l2.(*coreLogger).rotWriter
+	rw1 := mustCoreLogger(t, l1).rotWriter
+	rw2 := mustCoreLogger(t, l2).rotWriter
 	require.NotNil(t, rw1)
 	assert.Same(t, rw1, rw2, "同路径应复用同一 rotatingWriter")
 	assert.Equal(t, int32(2), rw1.refs.Load())
@@ -409,20 +399,19 @@ func TestSharedRotatingWriter(t *testing.T) {
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		for i := 0; i < n; i++ {
+		for i := range n {
 			l1.Infof("a-%d", i)
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		for i := 0; i < n; i++ {
+		for i := range n {
 			l2.Infof("b-%d", i)
 		}
 	}()
 	wg.Wait()
 
-	content, err := os.ReadFile(logPath)
-	require.NoError(t, err)
+	content := readLogFile(t, logPath)
 	assert.Contains(t, string(content), "a-0")
 	assert.Contains(t, string(content), "b-0")
 	assert.GreaterOrEqual(t, strings.Count(string(content), "\n"), n*2)
@@ -441,15 +430,14 @@ func TestClonePreservesRotWriter(t *testing.T) {
 	orig := mustNew(t, cfg)
 	cloned := orig.Clone()
 
-	assert.Same(t, orig.(*coreLogger).rotWriter, cloned.(*coreLogger).rotWriter)
-	assert.False(t, cloned.(*coreLogger).ownsWriter)
+	assert.Same(t, mustCoreLogger(t, orig).rotWriter, mustCoreLogger(t, cloned).rotWriter)
+	assert.False(t, mustCoreLogger(t, cloned).ownsWriter)
 
 	SetDefaultLogger(orig)
 	Info("via default after clone")
 	require.NoError(t, Sync())
 
-	content, err := os.ReadFile(logPath)
-	require.NoError(t, err)
+	content := readLogFile(t, logPath)
 	assert.Contains(t, string(content), "via default after clone")
 
 	abs, err := filepath.Abs(logPath)
@@ -472,15 +460,13 @@ func TestSyncDoesNotCloseWriter(t *testing.T) {
 		WithLogInConsole(false),
 		WithRotationHours(0),
 	))
-	defer func() { _ = logger.Close() }()
 
 	logger.Info("before sync")
 	require.NoError(t, logger.Sync())
 	logger.Info("after sync")
 	require.NoError(t, logger.Sync())
 
-	content, err := os.ReadFile(logPath)
-	require.NoError(t, err)
+	content := readLogFile(t, logPath)
 	assert.Contains(t, string(content), "before sync")
 	assert.Contains(t, string(content), "after sync")
 }
@@ -489,12 +475,13 @@ func TestCloseReleasesWriter(t *testing.T) {
 	tmpDir := t.TempDir()
 	logPath := filepath.Join(tmpDir, "close.log")
 
-	logger := mustNew(t, NewConfig(
+	logger, err := NewLogger(NewConfig(
 		WithPath(logPath),
 		WithLogInFile(true),
 		WithLogInConsole(false),
 		WithRotationHours(0),
 	))
+	require.NoError(t, err)
 	logger.Info("closing")
 	require.NoError(t, logger.Close())
 	require.NoError(t, logger.Close()) // idempotent
@@ -527,15 +514,14 @@ func TestSetDefaultLoggerClosesPrevious(t *testing.T) {
 		WithLogInConsole(false),
 		WithRotationHours(0),
 	)))
-	defer func() { _ = Close() }()
+	t.Cleanup(func() { require.NoError(t, Close()) })
 
 	_, ok := writerRegistry.Load(abs1)
 	assert.False(t, ok, "旧路径 writer 应在替换时 Close 释放")
 
 	Info("on b")
 	require.NoError(t, Sync())
-	content, err := os.ReadFile(path2)
-	require.NoError(t, err)
+	content := readLogFile(t, path2)
 	assert.Contains(t, string(content), "on b")
 }
 
@@ -576,10 +562,6 @@ func TestConfigMismatchReusesWriter(t *testing.T) {
 		WithRotationSizeMB(50), // different, ignored
 		WithRotationHours(0),
 	))
-	defer func() {
-		_ = l1.Close()
-		_ = l2.Close()
-	}()
 
-	assert.Same(t, l1.(*coreLogger).rotWriter, l2.(*coreLogger).rotWriter)
+	assert.Same(t, mustCoreLogger(t, l1).rotWriter, mustCoreLogger(t, l2).rotWriter)
 }

@@ -10,6 +10,7 @@ import (
 // Level 表示日志级别的枚举类型
 type Level int
 
+// Log level constants ordered by severity.
 const (
 	DebugLevel   Level = iota // 调试级别
 	InfoLevel                 // 常规信息，用于跟踪程序运行状态

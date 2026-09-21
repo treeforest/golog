@@ -18,15 +18,16 @@ type SamplingConfig struct {
 
 // Config 日志配置结构体
 type Config struct {
-	Module          string         // 模块名称（显示在日志中）
-	Component       string         // 组件名称（显示在日志中）
-	Path            string         // 日志文件存储路径（如：/var/log/app.log）
-	Level           Level          // 日志级别（DebugLevel/InfoLevel/WarnLevel/ErrorLevel/FatalLevel）
-	MaxAgeDays      int            // 日志文件最长保留天数（超过将自动删除）
-	MaxBackups      int            // 最多保留备份文件个数（0 表示仅按 MaxAgeDays 清理）
-	RotationHours   int            // 日志滚动时间间隔（小时），映射为 timberjack RotationInterval；0 禁用
-	RotationSizeMB  int64          // 日志滚动大小阈值（单位：MB）
-	Compress        bool           // 是否对轮转后的旧日志进行 gzip 压缩
+	Module         string // 模块名称（显示在日志中）
+	Component      string // 组件名称（显示在日志中）
+	Path           string // 日志文件存储路径（如：/var/log/app.log）
+	Level          Level  // 日志级别（DebugLevel/InfoLevel/WarnLevel/ErrorLevel/FatalLevel）
+	MaxAgeDays     int    // 日志文件最长保留天数（超过将自动删除）
+	MaxBackups     int    // 最多保留备份文件个数（0 表示仅按 MaxAgeDays 清理）
+	RotationHours  int    // 日志滚动时间间隔（小时），映射为 timberjack RotationInterval；0 禁用
+	RotationSizeMB int64  // 日志滚动大小阈值（单位：MB）
+	Compress       bool   // 是否对轮转后的旧日志进行 gzip 压缩
+	//nolint:revive // var-naming: JsonFormat kept for API stability
 	JsonFormat      bool           // 是否使用 JSON 格式输出日志
 	UseUTC          bool           // JSON 时间是否使用 UTC（RFC3339Nano）
 	ShowLine        bool           // 是否显示调用文件名和行号
@@ -138,6 +139,8 @@ func WithCompress(compress bool) Option {
 }
 
 // WithJsonFormat 设置是否使用 JSON 格式
+//
+//nolint:revive // var-naming: JsonFormat kept for API stability
 func WithJsonFormat(jsonFormat bool) Option {
 	return func(c *Config) {
 		c.JsonFormat = jsonFormat

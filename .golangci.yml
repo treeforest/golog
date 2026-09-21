@@ -1,0 +1,54 @@
+version: "2"
+run:
+  concurrency: 4
+  tests: true
+
+linters:
+  default: none
+  enable:
+    - bodyclose
+    - copyloopvar
+    - cyclop
+    - errcheck
+    - errorlint
+    - fatcontext
+    - gocritic
+    - gosec
+    - ineffassign
+    - misspell
+    - modernize
+    # nilnil 默认关闭：仓储层常用 (nil, nil) 表示未找到
+    - nilnesserr
+    - revive
+    - rowserrcheck
+    - sqlclosecheck
+    - staticcheck
+    - unconvert
+    - usestdlibvars
+    - whitespace
+
+  settings:
+    cyclop:
+      max-complexity: 15
+    errcheck:
+      check-type-assertions: true
+      check-blank: true
+    revive:
+      rules:
+        - name: exported
+          severity: warning
+        - name: package-comments
+          severity: warning
+        - name: var-naming
+          severity: warning
+
+  exclusions:
+    generated: lax
+
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
+
+formatters:
+  exclusions:
+    generated: lax

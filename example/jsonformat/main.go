@@ -1,12 +1,20 @@
+// JSON 格式输出（控制台）；也可用 Zap() 写强类型字段。
 package main
 
 import (
+	"log"
+
 	"github.com/treeforest/golog/v2"
 	"go.uber.org/zap"
 )
 
-// JSON 格式输出（控制台）；也可用 Zap() 写强类型字段
 func main() {
+	if err := run(); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func run() error {
 	cfg := golog.NewConfig(
 		golog.WithModule("api"),
 		golog.WithJsonFormat(true),
@@ -16,7 +24,11 @@ func main() {
 	)
 	logger := golog.MustNewLogger(cfg)
 	golog.SetDefaultLogger(logger)
-	defer func() { _ = golog.Close() }()
+	defer func() {
+		if err := golog.Close(); err != nil {
+			log.Printf("close default logger: %v", err)
+		}
+	}()
 
 	golog.Debug("debug message")
 	golog.Info("info message")
@@ -27,4 +39,5 @@ func main() {
 		zap.String("route", "/v1/health"),
 		zap.Int("latency_ms", 12),
 	)
+	return nil
 }

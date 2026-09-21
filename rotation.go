@@ -39,7 +39,7 @@ func getRotatingWriter(cfg *Config) (*rotatingWriter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve log path: %w", err)
 	}
-	if err := os.MkdirAll(filepath.Dir(absPath), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(absPath), 0o750); err != nil {
 		return nil, err
 	}
 
@@ -49,7 +49,10 @@ func getRotatingWriter(cfg *Config) (*rotatingWriter, error) {
 	}
 
 	if existing, ok := writerRegistry.Load(absPath); ok {
-		rw := existing.(*rotatingWriter)
+		rw, ok := existing.(*rotatingWriter)
+		if !ok {
+			return nil, fmt.Errorf("golog: invalid writer type in registry for %s", absPath)
+		}
 		warnIfConfigMismatch(rw, cfg, maxSize)
 		rw.acquire()
 		return rw, nil
@@ -86,7 +89,10 @@ func getRotatingWriter(cfg *Config) (*rotatingWriter, error) {
 
 	actual, loaded := writerRegistry.LoadOrStore(absPath, rw)
 	if loaded {
-		existing := actual.(*rotatingWriter)
+		existing, ok := actual.(*rotatingWriter)
+		if !ok {
+			return nil, fmt.Errorf("golog: invalid writer type in registry for %s", absPath)
+		}
 		warnIfConfigMismatch(existing, cfg, maxSize)
 		existing.acquire()
 		return existing, nil
@@ -115,7 +121,9 @@ func (rw *rotatingWriter) release() {
 		return
 	}
 	rw.closeOnce.Do(func() {
-		_ = rw.Logger.Close()
+		if err := rw.Close(); err != nil {
+			log.Printf("golog: close rotating writer %s: %v", rw.path, err)
+		}
 		writerRegistry.Delete(rw.path)
 	})
 }
