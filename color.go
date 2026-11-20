@@ -6,31 +6,31 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// color ANSI 终端颜色码
+// color ANSI 终端前景色编码定义。
 type color int
 
 const (
-	colorBlack color = iota + 30
-	colorRed
-	colorGreen
-	colorYellow
-	colorBlue
-	colorMagenta
-	colorCyan
-	colorWhite
+	colorBlack   color = iota + 30 // 黑色
+	colorRed                       // 红色
+	colorGreen                     // 绿色
+	colorYellow                    // 黄色
+	colorBlue                      // 蓝色
+	colorMagenta                   // 洋红/紫色
+	colorCyan                      // 青色/蓝绿
+	colorWhite                     // 白色
 )
 
-// showColor 为文本添加 ANSI 颜色
+// showColor 将文本包装为标准 ANSI 颜色转义字符。
 func showColor(c color, msg string) string {
 	return fmt.Sprintf("\033[%dm%s\033[0m", int(c), msg)
 }
 
-// showColorBold 为文本添加 ANSI 粗体颜色
+// showColorBold 将文本包装为带粗体（Bold）属性的 ANSI 颜色转义字符。
 func showColorBold(c color, msg string) string {
 	return fmt.Sprintf("\033[%d;1m%s\033[0m", int(c), msg)
 }
 
-// levelColor 根据日志级别返回对应颜色
+// levelColor 根据日志级别返回对应的 ANSI 终端颜色。
 func levelColor(level zapcore.Level) color {
 	switch level {
 	case zapcore.DebugLevel:
@@ -48,7 +48,8 @@ func levelColor(level zapcore.Level) color {
 	}
 }
 
-// colorLevelEncoder 为控制台输出级别字段着色（INFO 绿 / WARN 黄 / ERROR 红等）
+// colorLevelEncoder 为终端控制台输出提供级别字段的高亮着色编码（INFO 绿色 / WARN 黄色 / ERROR 红色 / FATAL 红色粗体）。
+// 注意：该编码器仅作用于终端控制台输出，不会应用于文件输出流，以保持文件纯文本纯净。
 func colorLevelEncoder(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {
 	text := level.CapitalString()
 	if level >= zapcore.FatalLevel {

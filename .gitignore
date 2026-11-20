@@ -1,3 +1,16 @@
-/.idea/
-/logs/
-/tmp/
+# Binaries & Tooling
+bin/
+*.exe
+*.test
+*.out
+
+# Logs & Testing artefacts
+logs/
+tmp/
+*.log
+coverage.out
+
+# OS & IDE
+.DS_Store
+.idea/
+.vscode/

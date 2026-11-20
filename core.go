@@ -10,33 +10,33 @@ import (
 	"go.uber.org/zap/zapcore"
 )
 
-// sinkKind 标识日志输出目标类型，用于选择不同的编码策略
+// sinkKind 标识日志输出目标类型，用于按需选择不同的编码与着色策略。
 type sinkKind int
 
 const (
-	sinkFile    sinkKind = iota // 文件输出（纯文本，无 ANSI）
-	sinkConsole                 // 控制台输出（可彩色级别）
-	sinkExtra                   // 额外 io.Writer（与文件侧编码一致）
+	sinkFile    sinkKind = iota // 文件输出目标（强制纯文本编码，无 ANSI 转义字符）
+	sinkConsole                 // 控制台输出目标（支持对级别字段进行 ANSI 终端着色）
+	sinkExtra                   // 额外自定义 io.Writer 输出目标（采用纯文本编码）
 )
 
-// noopSyncWriter 是对 zapcore.WriteSyncer 的装饰器实现
-// 功能：包装一个基础 WriteSyncer 并覆盖其 Sync 方法，使其不执行任何同步操作
-// 设计目的：解决对某些特殊输出流（如 os.Stderr）调用 Sync 方法时可能出现的
+// noopSyncWriter 是对 zapcore.WriteSyncer 的装饰器实现。
 //
-//	"sync /dev/stderr: invalid argument" 错误
-//
-// 适用场景：当底层写入器不需要或不支持 Sync 操作时使用
+// 设计背景：
+// 在特定操作系统或容器化环境（如某些 Linux 变体）中，对系统标准错误输出流（os.Stderr / /dev/stderr）
+// 调用系统级 Sync (fsync) 操作时，可能会返回 "sync /dev/stderr: invalid argument" 错误。
+// 该装饰器覆写了 Sync 方法并直接返回 nil，避免对无须刷新或不支持刷新的流操作产生误报警报。
 type noopSyncWriter struct {
 	zapcore.WriteSyncer
 }
 
-// Sync 空实现，不执行任何操作
+// Sync 空实现，不执行任何底层系统同步。
 func (n *noopSyncWriter) Sync() error {
 	return nil
 }
 
-// NewLogger 根据配置创建 Logger，可附加自定义 io.Writer 作为额外输出。
-// 调用方在进程退出前应对返回的 Logger 调用 Close（若未将所有权交给 SetDefaultLogger）。
+// NewLogger 根据给定的配置与可选的自定义输出流创建并返回 Logger 实例。
+//
+// 调用方若启用了文件持久化输出，在应用程序正常退出前应当对返回的 Logger 调用 Close() 以确保刷盘并释放资源。
 func NewLogger(logConfig *Config, writer ...io.Writer) (Logger, error) {
 	if logConfig == nil {
 		logConfig = defaultConfig()
@@ -50,11 +50,10 @@ func NewLogger(logConfig *Config, writer ...io.Writer) (Logger, error) {
 		zapLogger:     zapLogger,
 		atomicLevel:   aLevel,
 		rotWriter:     rotWriter,
-		ownsWriter:    rotWriter != nil,
 	}, nil
 }
 
-// MustNewLogger 同 NewLogger，失败时 Fatal
+// MustNewLogger 功能同 NewLogger，但当创建失败时会直接输出错误并终止进程（os.Exit(1)）。
 func MustNewLogger(logConfig *Config, writer ...io.Writer) Logger {
 	l, err := NewLogger(logConfig, writer...)
 	if err != nil {
@@ -63,13 +62,13 @@ func MustNewLogger(logConfig *Config, writer ...io.Writer) Logger {
 	return l
 }
 
-// logFatalf 可在测试中替换
+// logFatalf 供内部在发生致命初始化错误时调用，测试中可被替换以验证行为。
 var logFatalf = func(format string, args ...any) {
 	_, _ = fmt.Fprintf(os.Stderr, format+"\n", args...)
 	os.Exit(1)
 }
 
-// initZapLogger 初始化 zap.Logger 及原子级别控制器
+// initZapLogger 构造底层 zap.Logger 实例、原子日志级别控制器及文件轮转写入器。
 func initZapLogger(logConfig *Config, writer ...io.Writer) (*zap.Logger, zap.AtomicLevel, *rotatingWriter, error) {
 	aLevel := zap.NewAtomicLevel()
 	aLevel.SetLevel(logConfig.Level.ZapLevel())
@@ -81,7 +80,7 @@ func initZapLogger(logConfig *Config, writer ...io.Writer) (*zap.Logger, zap.Ato
 	return zapLogger, aLevel, rotWriter, nil
 }
 
-// newZapLogger 创建底层 zap.Logger，按配置组装 Tee Core（文件 / 控制台 / 额外输出）
+// newZapLogger 创建底层 zap.Logger，根据配置组装 Tee Core（同时分流至文件、控制台及额外 Writer）。
 func newZapLogger(logConfig *Config, level zap.AtomicLevel, writer ...io.Writer) (*zap.Logger, *rotatingWriter, error) {
 	var cores []zapcore.Core
 	var rotWriter *rotatingWriter
@@ -92,11 +91,12 @@ func newZapLogger(logConfig *Config, level zap.AtomicLevel, writer ...io.Writer)
 			return nil, nil, fmt.Errorf("create rotating writer: %w", err)
 		}
 		rotWriter = rw
-		// rotatingWriter 嵌入 timberjack，已实现 zapcore.WriteSyncer
+		// 文件目标：纯文本编码，确保文件内不含 ANSI 彩色控制字符
 		cores = append(cores, buildCore(logConfig, level, rw, sinkFile))
 	}
 
 	if logConfig.LogInConsole {
+		// 控制台目标：包装 noopSyncWriter，按需启用彩色级别编码
 		cores = append(cores, buildCore(logConfig, level, &noopSyncWriter{WriteSyncer: zapcore.AddSync(os.Stderr)}, sinkConsole))
 	}
 
@@ -114,7 +114,7 @@ func newZapLogger(logConfig *Config, level zap.AtomicLevel, writer ...io.Writer)
 	} else {
 		core = zapcore.NewTee(cores...)
 	}
-	// 采样包在 Tee 外层，保证多 sink 采样一致
+	// 采样包装在 Tee 核心外层，确保所有输出目标采样的记录保持一致
 	core = wrapSampling(logConfig, core)
 
 	name := loggerName(logConfig)
@@ -130,7 +130,7 @@ func newZapLogger(logConfig *Config, level zap.AtomicLevel, writer ...io.Writer)
 	return logger, rotWriter, nil
 }
 
-// loggerName 组装纯文本 logger 名称（不含 ANSI 颜色码）
+// loggerName 拼接纯文本 Logger 模块与组件名称（格式为 "Module @Component" 或 "Module"）。
 func loggerName(cfg *Config) string {
 	if cfg.Component != "" {
 		return fmt.Sprintf("%s @%s", cfg.Module, cfg.Component)
@@ -138,13 +138,13 @@ func loggerName(cfg *Config) string {
 	return cfg.Module
 }
 
-// buildCore 为指定输出目标构建 zapcore.Core（采样在 Tee 之后统一包裹）
+// buildCore 根据配置、级别、写入器和目标类型构建独立的 zapcore.Core。
 func buildCore(cfg *Config, level zap.AtomicLevel, ws zapcore.WriteSyncer, kind sinkKind) zapcore.Core {
 	enc := newEncoder(cfg, kind)
 	return zapcore.NewCore(enc, ws, level)
 }
 
-// wrapSampling 按配置包裹采样 Core
+// wrapSampling 按配置将 zapcore.Core 包装为采样限流 Core。
 func wrapSampling(cfg *Config, core zapcore.Core) zapcore.Core {
 	if !cfg.Sampling.Enabled {
 		return core
@@ -160,18 +160,18 @@ func wrapSampling(cfg *Config, core zapcore.Core) zapcore.Core {
 	return zapcore.NewSamplerWithOptions(core, time.Second, initial, thereafter)
 }
 
-// newEncoder 根据格式与输出目标创建编码器
+// newEncoder 根据输出格式（JSON 或 控制台文本）和目标类型创建对应的编码器。
 func newEncoder(cfg *Config, kind sinkKind) zapcore.Encoder {
 	encCfg := encoderConfig(cfg, kind)
-	if cfg.JsonFormat {
+	if cfg.JSONFormat {
 		return zapcore.NewJSONEncoder(encCfg)
 	}
 	return zapcore.NewConsoleEncoder(encCfg)
 }
 
-// encoderConfig 构建编码器配置（文件与控制台可不同）
+// encoderConfig 根据配置和输出目标类型（终端/文件）构建编码器具体参数。
 func encoderConfig(cfg *Config, kind sinkKind) zapcore.EncoderConfig {
-	if cfg.IsBrief {
+	if cfg.Brief {
 		return zapcore.EncoderConfig{
 			TimeKey:    "time",
 			MessageKey: "msg",
@@ -201,20 +201,20 @@ func encoderConfig(cfg *Config, kind sinkKind) zapcore.EncoderConfig {
 	}
 }
 
-// encodeTimeForSink 按输出格式选择时间编码器
+// encodeTimeForSink 根据输出格式选择对应的时间格式化器。
 func encodeTimeForSink(cfg *Config) zapcore.TimeEncoder {
-	if cfg.JsonFormat {
+	if cfg.JSONFormat {
 		return rfc3339TimeEncoder(cfg.UseUTC)
 	}
 	return consoleTimeEncoder
 }
 
-// consoleTimeEncoder 控制台/文本格式时间：本地时间，精确到毫秒
+// consoleTimeEncoder 控制台与纯文本格式时间格式化：本地时区，精确至毫秒。
 func consoleTimeEncoder(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 	enc.AppendString(t.Local().Format("2006-01-02 15:04:05.000"))
 }
 
-// rfc3339TimeEncoder JSON 格式时间：RFC3339Nano，可选 UTC
+// rfc3339TimeEncoder JSON 格式时间格式化：RFC3339Nano 格式，可选择是否转换为 UTC。
 func rfc3339TimeEncoder(useUTC bool) zapcore.TimeEncoder {
 	return func(t time.Time, enc zapcore.PrimitiveArrayEncoder) {
 		if useUTC {

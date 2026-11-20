@@ -1,4 +1,4 @@
-// 压测按大小轮转：并发写入约数 MB，验证生成多个备份文件。
+// 示例：工业级日志轮转、归档压缩与备份生命周期管理（基于 lumberjack.v2）。
 package main
 
 import (
@@ -6,132 +6,85 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
-	"sync"
-	"sync/atomic"
-	"time"
+	"strings"
 
 	"github.com/treeforest/golog/v2"
 )
 
-// 预期：
-//   - 活动文件：rotation.log
-//   - 备份：rotation.log-YYYYMMDDHHmmss-size（本地时区）
 func main() {
-	os.Exit(run())
+	if err := run(); err != nil {
+		log.Fatalf("运行失败: %v", err)
+	}
 }
 
-func run() int {
-	dir := "./logs/rotation"
-	if err := os.RemoveAll(dir); err != nil {
-		log.Printf("remove dir: %v", err)
-		return 1
-	}
+func run() error {
+	dir := "./logs/rotation_demo"
+	_ = os.RemoveAll(dir) // 演示前重置目录
 	if err := os.MkdirAll(dir, 0o750); err != nil {
-		log.Printf("mkdir: %v", err)
-		return 1
+		return err
 	}
-	logPath := filepath.Join(dir, "rotation.log")
+	logPath := filepath.Join(dir, "app.log")
 
+	fmt.Println("=== 1. 初始化标准文件轮转配置 ===")
 	cfg := golog.NewConfig(
-		golog.WithModule("bench"),
+		golog.WithModule("storage"),
 		golog.WithPath(logPath),
-		golog.WithLevel(golog.InfoLevel),
 		golog.WithLogInFile(true),
 		golog.WithLogInConsole(false),
-		golog.WithShowLine(false),
-		golog.WithRotationHours(0),
-		golog.WithRotationSizeMB(1),
-		golog.WithMaxBackups(20),
-		golog.WithMaxAgeDays(1),
+		golog.WithRotationSizeMB(1), // 单文件超过 1MB 自动切分滚动
+		golog.WithMaxBackups(5),     // 最多保留 5 个备份文件
+		golog.WithMaxAgeDays(7),     // 最长保留 7 天
+		golog.WithCompress(true),    // 对滚动后的旧日志进行 gzip 压缩
 	)
 	golog.SetDefaultLogger(golog.MustNewLogger(cfg))
-	defer func() {
-		if err := golog.Close(); err != nil {
-			log.Printf("close default logger: %v", err)
-		}
-	}()
 
-	const (
-		workers   = 8
-		perWorker = 80000
-		payload   = "abcdefghijklmnopqrstuvwxyz0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-	)
-
-	start := time.Now()
-	var written atomic.Int64
-	var wg sync.WaitGroup
-	wg.Add(workers)
-	for w := range workers {
-		go func(id int) {
-			defer wg.Done()
-			for i := range perWorker {
-				golog.Infof("w=%d i=%d pad=%s", id, i, payload)
-				written.Add(1)
-			}
-		}(w)
+	fmt.Println("=== 2. 模拟高频业务数据写入，触发文件大小轮转 ===")
+	// 单块 payload 64KB，写入多次迅速触发跨文件轮转
+	payload := strings.Repeat("0123456789ABCDEF", 4096) // 64KB
+	for i := range 40 {
+		golog.Infof("批量数据存档块 [%02d] 数据载荷: %s", i, payload)
 	}
-	wg.Wait()
-	if err := golog.Sync(); err != nil {
-		log.Printf("sync: %v", err)
-		return 1
-	}
-	elapsed := time.Since(start)
 
+	// 强制刷盘并安全关闭
+	if err := golog.Close(); err != nil {
+		return fmt.Errorf("关闭 Logger 失败: %w", err)
+	}
+
+	fmt.Println("\n=== 3. 检查生成的活动日志与滚动备份文件 ===")
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		log.Printf("readdir: %v", err)
-		return 1
+		return err
 	}
 
-	type fileInfo struct {
+	type fileItem struct {
 		name string
 		size int64
 	}
-	var files []fileInfo
-	var total int64
+	var files []fileItem
 	for _, e := range entries {
 		info, err := e.Info()
 		if err != nil {
 			continue
 		}
-		files = append(files, fileInfo{name: e.Name(), size: info.Size()})
-		total += info.Size()
+		files = append(files, fileItem{name: e.Name(), size: info.Size()})
 	}
 	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name })
 
-	backupRE := regexp.MustCompile(`^rotation\.log-\d{14}-size$`)
-	var backups int
-	var hasActive bool
-	fmt.Printf("dir=%s\n", dir)
-	fmt.Printf("lines=%d elapsed=%s throughput=%.0f lines/s\n",
-		written.Load(), elapsed.Round(time.Millisecond),
-		float64(written.Load())/elapsed.Seconds())
-	fmt.Println("--- files ---")
+	fmt.Printf("文件目录: %s\n", dir)
+	fmt.Printf("%-45s  %-12s  %s\n", "文件名", "大小(Bytes)", "说明")
+	fmt.Println(strings.Repeat("-", 75))
 	for _, f := range files {
-		kind := "other"
-		switch {
-		case f.name == "rotation.log":
-			kind = "active"
-			hasActive = true
-		case backupRE.MatchString(f.name):
-			kind = "backup"
-			backups++
+		desc := "归档备份文件 (lumberjack ISO 时间戳)"
+		if f.name == "app.log" {
+			desc = "当前活跃日志文件 (Active)"
+		} else if strings.HasSuffix(f.name, ".gz") {
+			desc = "已 gzip 压缩的归档日志"
 		}
-		fmt.Printf("%8d  %-40s  [%s]\n", f.size, f.name, kind)
+		fmt.Printf("%-45s  %-12d  %s\n", f.name, f.size, desc)
 	}
-	fmt.Printf("--- summary: files=%d backups=%d total_bytes=%d ---\n",
-		len(files), backups, total)
 
-	if !hasActive {
-		fmt.Println("FAIL: missing active rotation.log")
-		return 1
-	}
-	if backups < 2 {
-		fmt.Printf("FAIL: expected >=2 size backups, got %d\n", backups)
-		return 1
-	}
-	fmt.Println("OK: rotation naming and multi-file output look correct")
-	return 0
+	fmt.Println(strings.Repeat("-", 75))
+	fmt.Println("说明：文件命名格式为 app-YYYY-MM-DDTHH-MM-SS.sss.log(.gz)，符合工业界标准归档规范。")
+	return nil
 }

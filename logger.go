@@ -1,66 +1,93 @@
 package golog
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 
 	"go.uber.org/zap"
 )
 
-// Logger 接口定义
+// Logger 是通用的结构化日志记录器接口。
+//
+// 该接口提供了常见的 Debug、Info、Warn、Error、Fatal 级别的日志输出能力，
+// 涵盖普通输出、格式化输出（f 系列）与结构化键值输出（w 系列），
+// 同时提供流式不可变派生（With / WithContext / WithCallerSkip）与生命周期管理方法。
+// 该接口的所有实现必须保证并发安全（Concurrency Safe）。
 type Logger interface {
+	// Debug 使用默认参数列表记录 DEBUG 级别的日志。
 	Debug(args ...any)
+	// Debugf 根据指定的格式化模板记录 DEBUG 级别的日志。
 	Debugf(format string, args ...any)
+	// Debugw 记录包含成对键值对的 DEBUG 级别结构化日志。
 	Debugw(msg string, keysAndValues ...any)
 
+	// Info 使用默认参数列表记录 INFO 级别的日志。
 	Info(args ...any)
+	// Infof 根据指定的格式化模板记录 INFO 级别的日志。
 	Infof(format string, args ...any)
+	// Infow 记录包含成对键值对的 INFO 级别结构化日志。
 	Infow(msg string, keysAndValues ...any)
 
+	// Warn 使用默认参数列表记录 WARN 级别的日志。
 	Warn(args ...any)
+	// Warnf 根据指定的格式化模板记录 WARN 级别的日志。
 	Warnf(format string, args ...any)
+	// Warnw 记录包含成对键值对的 WARN 级别结构化日志。
 	Warnw(msg string, keysAndValues ...any)
 
+	// Error 使用默认参数列表记录 ERROR 级别的日志。
 	Error(args ...any)
+	// Errorf 根据指定的格式化模板记录 ERROR 级别的日志。
 	Errorf(format string, args ...any)
+	// Errorw 记录包含成对键值对的 ERROR 级别结构化日志。
 	Errorw(msg string, keysAndValues ...any)
 
+	// Fatal 使用默认参数列表记录 FATAL 级别的日志，并在输出后终止进程（os.Exit(1)）。
 	Fatal(args ...any)
+	// Fatalf 根据指定的格式化模板记录 FATAL 级别的日志，并在输出后终止进程（os.Exit(1)）。
 	Fatalf(format string, args ...any)
+	// Fatalw 记录包含成对键值对的 FATAL 级别结构化日志，并在输出后终止进程（os.Exit(1)）。
 	Fatalw(msg string, keysAndValues ...any)
 
-	AddCallerSkip(skip int)
-	SetLevel(lvl Level)
-	GetLevel() Level
-	// Sync 刷盘，不关闭文件写入器
-	Sync() error
-	// Close 刷盘并释放文件写入器所有权（进程退出时调用）
-	Close() error
+	// WithContext 派生绑定了指定 context 字段（如 trace_id / request_id）的 Logger 独立副本（不可变操作）。
+	WithContext(ctx context.Context) Logger
+	// With 派生附加了指定键值对字段的 Logger 独立副本（不可变操作）。
+	With(keysAndValues ...any) Logger
+	// WithCallerSkip 派生调整了调用栈跳跃层级的 Logger 独立副本（不可变操作）。
+	WithCallerSkip(skip int) Logger
 
-	// Zap 返回底层强类型 zap.Logger，适用于热路径
-	Zap() *zap.Logger
-	// Clone 创建独立副本（内建 AddCallerSkip(1)），共享 rotWriter 但不取得所有权
-	Clone() Logger
+	// SetLevel 动态调整当前 Logger 的日志级别（线程安全）。
+	SetLevel(lvl Level)
+	// GetLevel 获取当前 Logger 的日志级别。
+	GetLevel() Level
+
+	// Sync 将缓冲区中未写入的数据强制刷入底层存储（不关闭文件句柄）。
+	Sync() error
+	// Close 刷盘并减少底层写入器的引用计数。当所有引用均释放后，关闭底层文件句柄。
+	Close() error
 }
 
-// coreLogger 基于 zap 的 Logger 实现
+// coreLogger 是基于 Uber Zap 实现的 Logger 核心结构体。
 type coreLogger struct {
 	*zap.SugaredLogger
-	zapLogger   *zap.Logger     // 底层 zap.Logger，供 Zap() 与选项变更使用
-	atomicLevel zap.AtomicLevel // 原子级别，支持运行时 SetLevel
-	rotWriter   *rotatingWriter // 文件轮转写入器（可与 Clone/Context 派生共享）
-	ownsWriter  bool            // 是否持有 rotWriter 引用（Close 时 release）
-	mu          sync.Mutex      // 保护 AddCallerSkip 时的指针替换
-	closeOnce   sync.Once
+	zapLogger   *zap.Logger     // 底层 zap.Logger 实例
+	atomicLevel zap.AtomicLevel // 原子级别控制器，支持运行时无锁并发读写
+	rotWriter   *rotatingWriter // 底层文件轮转写入器（通过引用计数复用与释放）
+	mu          sync.Mutex      // 互斥锁，保护并发操作
+	closeOnce   sync.Once       // 确保 Close 操作只执行一次
 }
 
 var _ Logger = (*coreLogger)(nil)
 
+// SetLevel 动态调整当前 coreLogger 的最低输出级别。
 func (l *coreLogger) SetLevel(lvl Level) {
 	l.atomicLevel.SetLevel(lvl.ZapLevel())
 }
 
+// GetLevel 获取当前 coreLogger 的生效级别。
 func (l *coreLogger) GetLevel() Level {
 	lvl, err := ParseLevel(l.atomicLevel.Level().String())
 	if err != nil {
@@ -69,37 +96,51 @@ func (l *coreLogger) GetLevel() Level {
 	return lvl
 }
 
-func (l *coreLogger) AddCallerSkip(skip int) {
+// WithCallerSkip 返回调整了 caller skip 的独立 Logger 副本（不可变）。
+func (l *coreLogger) WithCallerSkip(skip int) Logger {
 	l.mu.Lock()
-	defer l.mu.Unlock()
-	l.zapLogger = l.zapLogger.WithOptions(zap.AddCallerSkip(skip))
-	l.SugaredLogger = l.zapLogger.Sugar()
-}
-
-// Zap 返回底层 *zap.Logger
-func (l *coreLogger) Zap() *zap.Logger {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	return l.zapLogger
-}
-
-// Clone 克隆 Logger 并增加一层 caller skip，不修改原实例；共享 rotWriter，不转移所有权
-func (l *coreLogger) Clone() Logger {
-	l.mu.Lock()
-	zl := l.zapLogger.WithOptions(zap.AddCallerSkip(1))
+	zl := l.zapLogger.WithOptions(zap.AddCallerSkip(skip))
 	rw := l.rotWriter
 	al := l.atomicLevel
 	l.mu.Unlock()
+
+	if rw != nil {
+		rw.acquire()
+	}
 	return &coreLogger{
 		SugaredLogger: zl.Sugar(),
 		zapLogger:     zl,
 		atomicLevel:   al,
 		rotWriter:     rw,
-		ownsWriter:    false,
 	}
 }
 
-// Sync 刷盘，不关闭写入器
+// With 返回附加了额外结构化键值对的独立 Logger 副本（不可变）。
+func (l *coreLogger) With(keysAndValues ...any) Logger {
+	l.mu.Lock()
+	zl := l.zapLogger
+	rw := l.rotWriter
+	al := l.atomicLevel
+	l.mu.Unlock()
+
+	sugar := zl.Sugar().With(keysAndValues...)
+	if rw != nil {
+		rw.acquire()
+	}
+	return &coreLogger{
+		SugaredLogger: sugar,
+		zapLogger:     sugar.Desugar(),
+		atomicLevel:   al,
+		rotWriter:     rw,
+	}
+}
+
+// WithContext 返回绑定了上下文链路字段（trace_id / request_id 等）的独立 Logger 副本。
+func (l *coreLogger) WithContext(ctx context.Context) Logger {
+	return withContextFields(l, ctx)
+}
+
+// Sync 执行日志缓冲区刷盘。
 func (l *coreLogger) Sync() error {
 	l.mu.Lock()
 	zl := l.zapLogger
@@ -107,78 +148,58 @@ func (l *coreLogger) Sync() error {
 	return zl.Sync()
 }
 
-// Close 刷盘并释放对本 logger 持有的 rotWriter 引用
+// Close 执行刷盘并递减底层文件写入器的引用计数；当引用归零时由底层安全释放句柄。
 func (l *coreLogger) Close() error {
 	var err error
 	l.closeOnce.Do(func() {
 		err = l.Sync()
-		if l.ownsWriter && l.rotWriter != nil {
+		if l.rotWriter != nil {
 			l.rotWriter.release()
-			l.ownsWriter = false
 		}
 	})
 	return err
 }
 
 var (
-	defaultMu     sync.RWMutex // 保护 defaultLogger 并发读写
-	defaultLogger Logger
-	defaultOnce   sync.Once // 首次调用全局方法时懒加载默认 Logger
+	defaultLogger atomic.Pointer[coreLogger] // 全局默认 Logger 指针（原子读写，免锁）
+	defaultOnce   sync.Once                  // 保证全局默认 Logger 仅懒加载初始化一次
 )
 
-// transferOwnership 将 rotWriter 所有权从 src 转到 dst（均为 *coreLogger）
-func transferOwnership(src, dst *coreLogger) {
-	if src == nil || dst == nil {
-		return
-	}
-	if !src.ownsWriter || src.rotWriter == nil {
-		return
-	}
-	dst.rotWriter = src.rotWriter
-	dst.ownsWriter = true
-	src.ownsWriter = false
-}
-
-// getDefault 获取全局默认 Logger（懒加载 + 读锁）
-func getDefault() Logger {
+// initDefaultLogger 执行全局默认 Logger 的懒加载初始化。
+func initDefaultLogger() *coreLogger {
 	defaultOnce.Do(func() {
-		defaultMu.Lock()
-		defer defaultMu.Unlock()
-		if defaultLogger != nil {
-			return
-		}
 		root := MustNewLogger(defaultConfig())
 		rootCore, ok := root.(*coreLogger)
 		if !ok {
 			panic("golog: internal error: root logger is not *coreLogger")
 		}
-		clonedCore, ok := root.Clone().(*coreLogger)
-		if !ok {
-			panic("golog: internal error: cloned logger is not *coreLogger")
-		}
-		transferOwnership(rootCore, clonedCore)
-		defaultLogger = clonedCore
+		defaultLogger.Store(rootCore)
 	})
-	defaultMu.RLock()
-	defer defaultMu.RUnlock()
-	return defaultLogger
+	return defaultLogger.Load()
 }
 
-// SetDefaultLogger 设置全局默认 Logger（内部 Clone，不修改传入实例的 caller skip）。
-// 若传入实例持有文件 writer 所有权，将转移给全局 default；替换时 Close 旧 default。
+// getDefault 获取全局默认 Logger 实例（无额外包装，skip=0）。
+func getDefault() *coreLogger {
+	if l := defaultLogger.Load(); l != nil {
+		return l
+	}
+	return initDefaultLogger()
+}
+
+// getPackageLogger 获取专门适配包级全局函数（如 golog.Info）的 SugaredLogger（内建 AddCallerSkip(1)）。
+func getPackageLogger() *zap.SugaredLogger {
+	base := getDefault()
+	return base.zapLogger.WithOptions(zap.AddCallerSkip(1)).Sugar()
+}
+
+// SetDefaultLogger 设置全局默认 Logger。替换前将自动关闭并安全释放旧的全局默认 Logger。
 func SetDefaultLogger(logger Logger) {
-	cloned := logger.Clone()
-	if src, ok := logger.(*coreLogger); ok {
-		if dst, ok := cloned.(*coreLogger); ok {
-			transferOwnership(src, dst)
-		}
+	newCore, ok := logger.(*coreLogger)
+	if !ok {
+		panic("golog: SetDefaultLogger requires *coreLogger implementation")
 	}
 
-	defaultMu.Lock()
-	prev := defaultLogger
-	defaultLogger = cloned
-	defaultMu.Unlock()
-
+	prev := defaultLogger.Swap(newCore)
 	if prev != nil {
 		if err := prev.Close(); err != nil {
 			_, _ = fmt.Fprintf(os.Stderr, "golog: close previous default logger: %v\n", err)
@@ -186,106 +207,99 @@ func SetDefaultLogger(logger Logger) {
 	}
 }
 
-// Debug logs a debug message using the default logger.
+// Debug 使用全局默认 Logger 记录 DEBUG 级别日志。
 func Debug(args ...any) {
-	getDefault().Debug(args...)
+	getPackageLogger().Debug(args...)
 }
 
-// Debugf logs a formatted debug message using the default logger.
+// Debugf 使用全局默认 Logger 根据格式化模板记录 DEBUG 级别日志。
 func Debugf(format string, args ...any) {
-	getDefault().Debugf(format, args...)
+	getPackageLogger().Debugf(format, args...)
 }
 
-// Debugw logs a structured debug message using the default logger.
+// Debugw 使用全局默认 Logger 记录包含键值对的 DEBUG 级别结构化日志。
 func Debugw(msg string, keysAndValues ...any) {
-	getDefault().Debugw(msg, keysAndValues...)
+	getPackageLogger().Debugw(msg, keysAndValues...)
 }
 
-// Info logs an info message using the default logger.
+// Info 使用全局默认 Logger 记录 INFO 级别日志。
 func Info(args ...any) {
-	getDefault().Info(args...)
+	getPackageLogger().Info(args...)
 }
 
-// Infof logs a formatted info message using the default logger.
+// Infof 使用全局默认 Logger 根据格式化模板记录 INFO 级别日志。
 func Infof(format string, args ...any) {
-	getDefault().Infof(format, args...)
+	getPackageLogger().Infof(format, args...)
 }
 
-// Infow logs a structured info message using the default logger.
+// Infow 使用全局默认 Logger 记录包含键值对的 INFO 级别结构化日志。
 func Infow(msg string, keysAndValues ...any) {
-	getDefault().Infow(msg, keysAndValues...)
+	getPackageLogger().Infow(msg, keysAndValues...)
 }
 
-// Warn logs a warning message using the default logger.
+// Warn 使用全局默认 Logger 记录 WARN 级别日志。
 func Warn(args ...any) {
-	getDefault().Warn(args...)
+	getPackageLogger().Warn(args...)
 }
 
-// Warnf logs a formatted warning message using the default logger.
+// Warnf 使用全局默认 Logger 根据格式化模板记录 WARN 级别日志。
 func Warnf(format string, args ...any) {
-	getDefault().Warnf(format, args...)
+	getPackageLogger().Warnf(format, args...)
 }
 
-// Warnw logs a structured warning message using the default logger.
+// Warnw 使用全局默认 Logger 记录包含键值对的 WARN 级别结构化日志。
 func Warnw(msg string, keysAndValues ...any) {
-	getDefault().Warnw(msg, keysAndValues...)
+	getPackageLogger().Warnw(msg, keysAndValues...)
 }
 
-// Error logs an error message using the default logger.
+// Error 使用全局默认 Logger 记录 ERROR 级别日志。
 func Error(args ...any) {
-	getDefault().Error(args...)
+	getPackageLogger().Error(args...)
 }
 
-// Errorf logs a formatted error message using the default logger.
+// Errorf 使用全局默认 Logger 根据格式化模板记录 ERROR 级别日志。
 func Errorf(format string, args ...any) {
-	getDefault().Errorf(format, args...)
+	getPackageLogger().Errorf(format, args...)
 }
 
-// Errorw logs a structured error message using the default logger.
+// Errorw 使用全局默认 Logger 记录包含键值对的 ERROR 级别结构化日志。
 func Errorw(msg string, keysAndValues ...any) {
-	getDefault().Errorw(msg, keysAndValues...)
+	getPackageLogger().Errorw(msg, keysAndValues...)
 }
 
-// Fatal logs a fatal message using the default logger and exits.
+// Fatal 使用全局默认 Logger 记录 FATAL 级别日志并终止程序（os.Exit(1)）。
 func Fatal(args ...any) {
-	getDefault().Fatal(args...)
+	getPackageLogger().Fatal(args...)
 }
 
-// Fatalf logs a formatted fatal message using the default logger and exits.
+// Fatalf 使用全局默认 Logger 根据格式化模板记录 FATAL 级别日志并终止程序（os.Exit(1)）。
 func Fatalf(format string, args ...any) {
-	getDefault().Fatalf(format, args...)
+	getPackageLogger().Fatalf(format, args...)
 }
 
-// Fatalw logs a structured fatal message using the default logger and exits.
+// Fatalw 使用全局默认 Logger 记录包含键值对的 FATAL 级别结构化日志并终止程序（os.Exit(1)）。
 func Fatalw(msg string, keysAndValues ...any) {
-	getDefault().Fatalw(msg, keysAndValues...)
+	getPackageLogger().Fatalw(msg, keysAndValues...)
 }
 
-// SetLevel sets the log level on the default logger.
+// SetLevel 设置全局默认 Logger 的日志级别。
 func SetLevel(lvl Level) {
 	getDefault().SetLevel(lvl)
 }
 
-// GetLevel returns the current log level of the default logger.
+// GetLevel 获取全局默认 Logger 的日志级别。
 func GetLevel() Level {
 	return getDefault().GetLevel()
 }
 
-// AddCallerSkip increases caller skip on the default logger.
-func AddCallerSkip(skip int) {
-	getDefault().AddCallerSkip(skip)
-}
-
-// Sync 刷盘全局默认 Logger，不关闭
+// Sync 将全局默认 Logger 缓冲区中的日志数据强制刷入底层存储（不关闭文件句柄）。
 func Sync() error {
 	return getDefault().Sync()
 }
 
-// Close 关闭全局默认 Logger（刷盘并释放文件写入器）
+// Close 关闭全局默认 Logger，执行最终刷盘并安全释放底层文件句柄。
 func Close() error {
-	defaultMu.RLock()
-	l := defaultLogger
-	defaultMu.RUnlock()
+	l := defaultLogger.Load()
 	if l == nil {
 		return nil
 	}

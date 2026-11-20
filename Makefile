@@ -17,9 +17,29 @@ AUDIT_DIR ?=
 AUDIT_SKIP_DIRS ?= .git
 RACE_PKGS ?= './...'
 
+.PHONY: test cover bench lint clean
 .PHONY: audit-init audit-quick audit-gosec audit-staticcheck audit-vet audit-race
 .PHONY: audit-govulncheck audit-semgrep audit-trivy-vuln audit-trivy-fs audit-trivy
 .PHONY: audit-full audit-report
+
+##@ 开发构建
+
+test: ## 运行所有单元测试（包含竞态检测）
+	$(AUDIT_GO) test -v -race ./...
+
+cover: ## 运行单元测试并输出覆盖率报告
+	$(AUDIT_GO) test -coverprofile=coverage.out ./...
+	$(AUDIT_GO) tool cover -func=coverage.out
+
+bench: ## 运行基准性能测试
+	$(AUDIT_GO) test -bench=. -benchmem -run=^$$ ./...
+
+clean: ## 清理临时测试日志和分析文件
+	rm -f coverage.out
+	rm -rf logs/ tmp/
+
+lint: audit-vet ## 代码静态检查
+
 
 ##@ 代码质量
 

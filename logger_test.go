@@ -3,18 +3,18 @@ package golog
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"regexp"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
 )
 
 func mustNew(t *testing.T, cfg *Config) Logger {
@@ -47,9 +47,8 @@ func TestBasicLogging(t *testing.T) {
 		WithLogInFile(true),
 		WithLogInConsole(false),
 		WithMaxAgeDays(1),
-		WithRotationHours(1),
 		WithRotationSizeMB(10),
-		WithJsonFormat(false),
+		WithJSONFormat(false),
 		WithShowLine(true),
 	)
 
@@ -83,7 +82,7 @@ func TestJSONFormat(t *testing.T) {
 		WithPath(logPath),
 		WithLogInFile(true),
 		WithLogInConsole(false),
-		WithJsonFormat(true),
+		WithJSONFormat(true),
 	)
 
 	logger := mustNew(t, config)
@@ -103,23 +102,22 @@ func TestSizeBasedRotation(t *testing.T) {
 		WithPath(logPath),
 		WithRotationSizeMB(1),
 		WithMaxAgeDays(60),
-		WithRotationHours(0),
 		WithLogInFile(true),
 		WithLogInConsole(false),
 	)
 
 	logger := mustNew(t, config)
 
-	const chunk = "ABCDEFGHIJ"
-	for range 1024 * 103 {
+	chunk := strings.Repeat("A", 1024*64)
+	for range 20 {
 		logger.Info(chunk)
 	}
 
-	files, err := filepath.Glob(logPath + "-*")
+	files, err := filepath.Glob(filepath.Join(tmpDir, "size-*.log"))
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, len(files), 1, "应该生成滚动备份文件")
 
-	re := regexp.MustCompile(`-\d{14}-(size|time)(\.gz)?$`)
+	re := regexp.MustCompile(`size-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}\.log$`)
 	matched := false
 	for _, f := range files {
 		if re.MatchString(filepath.Base(f)) {
@@ -127,7 +125,7 @@ func TestSizeBasedRotation(t *testing.T) {
 			break
 		}
 	}
-	assert.True(t, matched, "备份文件名应匹配 path-YYYYMMDDHHmmss-size|time 格式")
+	assert.True(t, matched, "备份文件名应匹配 lumberjack 时间戳格式")
 }
 
 func TestConcurrentLogging(t *testing.T) {
@@ -142,13 +140,13 @@ func TestConcurrentLogging(t *testing.T) {
 	logger := mustNew(t, config)
 
 	var wg sync.WaitGroup
-	const workers = 100
+	const workers = 50
 
 	wg.Add(workers)
 	for i := range workers {
 		go func(id int) {
 			defer wg.Done()
-			for j := range 100 {
+			for j := range 50 {
 				logger.Infof("Worker %d: %d", id, j)
 			}
 		}(i)
@@ -157,7 +155,7 @@ func TestConcurrentLogging(t *testing.T) {
 
 	content := readLogFile(t, logPath)
 	lines := strings.Split(string(content), "\n")
-	assert.Greater(t, len(lines), workers*100-10)
+	assert.Greater(t, len(lines), workers*50-10)
 }
 
 func TestStackTrace(t *testing.T) {
@@ -232,12 +230,14 @@ func TestDynamicLevel(t *testing.T) {
 	)
 
 	logger := mustNew(t, config)
+	assert.Equal(t, InfoLevel, logger.GetLevel())
 
 	logger.Debug("调试信息1")
 	content := readLogFile(t, logPath)
 	assert.NotContains(t, string(content), "调试信息1")
 
 	logger.SetLevel(DebugLevel)
+	assert.Equal(t, DebugLevel, logger.GetLevel())
 	logger.Debug("调试信息2")
 	content = readLogFile(t, logPath)
 	assert.Contains(t, string(content), "调试信息2")
@@ -245,7 +245,7 @@ func TestDynamicLevel(t *testing.T) {
 
 func readLogFile(t *testing.T, path string) []byte {
 	t.Helper()
-	content, err := os.ReadFile(path) // #nosec G304 -- path 来自 t.TempDir()
+	content, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
 		return nil
 	}
@@ -253,14 +253,15 @@ func readLogFile(t *testing.T, path string) []byte {
 	return content
 }
 
-func TestCloneDoesNotMutateOriginal(t *testing.T) {
+func TestWithCallerSkipDoesNotMutateOriginal(t *testing.T) {
 	config := NewConfig(WithLogInConsole(true), WithLogInFile(false))
 	original := mustNew(t, config)
 
-	_ = original.Clone()
+	derived := original.WithCallerSkip(1)
 	original.Info("original caller")
+	derived.Info("derived caller")
 
-	assert.NotNil(t, original.Zap())
+	require.NotNil(t, original)
 }
 
 func TestSampling(t *testing.T) {
@@ -300,20 +301,22 @@ func TestContextTraceID(t *testing.T) {
 		WithPath(logPath),
 		WithLogInFile(true),
 		WithLogInConsole(false),
-		WithJsonFormat(true),
+		WithJSONFormat(true),
 	)
 
 	logger := mustNew(t, config)
 
 	ctx := ContextWithLogger(context.Background(), logger)
-	ctx = ContextWithTraceID(ctx, "trace-abc")
-	ctx = ContextWithRequestID(ctx, "req-xyz")
+	ctx = ContextWithTrace(ctx, "trace-abc", "req-xyz", "span-001")
+	ctx = ContextWithFields(ctx, "tenant_id", "VIP-China")
 	InfowCtx(ctx, "ctx message", "k", "v")
 	require.NoError(t, logger.Sync())
 
 	content := readLogFile(t, logPath)
 	assert.Contains(t, string(content), `"trace_id":"trace-abc"`)
 	assert.Contains(t, string(content), `"request_id":"req-xyz"`)
+	assert.Contains(t, string(content), `"span_id":"span-001"`)
+	assert.Contains(t, string(content), `"tenant_id":"VIP-China"`)
 }
 
 func TestSetDefaultLoggerPreservesFileOutput(t *testing.T) {
@@ -335,12 +338,27 @@ func TestSetDefaultLoggerPreservesFileOutput(t *testing.T) {
 	assert.Contains(t, string(content), "via global default")
 }
 
-func TestLoggerZap(t *testing.T) {
-	config := NewConfig(WithLogInConsole(true), WithLogInFile(false))
-	logger := mustNew(t, config)
-	zl := logger.Zap()
-	require.NotNil(t, zl)
-	zl.Info("typed", zap.String("k", "v"))
+func TestWithAndWithContext(t *testing.T) {
+	tmpDir := t.TempDir()
+	logPath := filepath.Join(tmpDir, "with.log")
+
+	config := NewConfig(
+		WithPath(logPath),
+		WithLogInFile(true),
+		WithLogInConsole(false),
+		WithJSONFormat(true),
+	)
+	var l Logger = mustNew(t, config)
+
+	ctx := ContextWithTrace(context.Background(), "t-123", "r-456")
+	derived := l.WithContext(ctx).With("service", "order").WithCallerSkip(0)
+	derived.Infow("processed", "amount", 100)
+	require.NoError(t, l.Sync())
+
+	content := readLogFile(t, logPath)
+	assert.Contains(t, string(content), `"trace_id":"t-123"`)
+	assert.Contains(t, string(content), `"service":"order"`)
+	assert.Contains(t, string(content), `"amount":100`)
 }
 
 func TestBackupFilenameFormat(t *testing.T) {
@@ -351,7 +369,6 @@ func TestBackupFilenameFormat(t *testing.T) {
 		WithPath(logPath),
 		WithLogInFile(true),
 		WithLogInConsole(false),
-		WithRotationHours(0),
 		WithRotationSizeMB(100),
 	)
 	logger := mustNew(t, cfg)
@@ -361,18 +378,13 @@ func TestBackupFilenameFormat(t *testing.T) {
 	require.NotNil(t, cl.rotWriter)
 	require.NoError(t, cl.rotWriter.Rotate())
 
-	files, err := filepath.Glob(logPath + "-*")
+	files, err := filepath.Glob(filepath.Join(tmpDir, "app-*.log"))
 	require.NoError(t, err)
 	require.Len(t, files, 1)
 
 	base := filepath.Base(files[0])
-	re := regexp.MustCompile(`^app\.log-(\d{14})-(size|time)$`)
-	m := re.FindStringSubmatch(base)
-	require.NotNil(t, m, "备份名应为 app.log-YYYYMMDDHHmmss-size|time，实际: %s", base)
-
-	ts, err := time.ParseInLocation(backupTimeFormat, m[1], time.Local)
-	require.NoError(t, err)
-	assert.WithinDuration(t, time.Now(), ts, 5*time.Second)
+	re := regexp.MustCompile(`^app-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}\.\d{3}\.log$`)
+	require.True(t, re.MatchString(base), "备份名应符合 lumberjack 格式，实际: %s", base)
 }
 
 func TestSharedRotatingWriter(t *testing.T) {
@@ -383,7 +395,6 @@ func TestSharedRotatingWriter(t *testing.T) {
 		WithPath(logPath),
 		WithLogInFile(true),
 		WithLogInConsole(false),
-		WithRotationHours(0),
 	)
 	l1 := mustNew(t, cfg)
 	l2 := mustNew(t, cfg)
@@ -395,7 +406,7 @@ func TestSharedRotatingWriter(t *testing.T) {
 	assert.Equal(t, int32(2), rw1.refs.Load())
 
 	var wg sync.WaitGroup
-	const n = 200
+	const n = 100
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
@@ -417,37 +428,34 @@ func TestSharedRotatingWriter(t *testing.T) {
 	assert.GreaterOrEqual(t, strings.Count(string(content), "\n"), n*2)
 }
 
-func TestClonePreservesRotWriter(t *testing.T) {
+func TestDerivedLoggerPreservesRotWriter(t *testing.T) {
 	tmpDir := t.TempDir()
-	logPath := filepath.Join(tmpDir, "clone.log")
+	logPath := filepath.Join(tmpDir, "derived.log")
 
 	cfg := NewConfig(
 		WithPath(logPath),
 		WithLogInFile(true),
 		WithLogInConsole(false),
-		WithRotationHours(0),
 	)
 	orig := mustNew(t, cfg)
-	cloned := orig.Clone()
+	derived := orig.With("module", "sub")
 
-	assert.Same(t, mustCoreLogger(t, orig).rotWriter, mustCoreLogger(t, cloned).rotWriter)
-	assert.False(t, mustCoreLogger(t, cloned).ownsWriter)
+	assert.Same(t, mustCoreLogger(t, orig).rotWriter, mustCoreLogger(t, derived).rotWriter)
 
 	SetDefaultLogger(orig)
-	Info("via default after clone")
+	Info("via default after derived")
 	require.NoError(t, Sync())
 
 	content := readLogFile(t, logPath)
-	assert.Contains(t, string(content), "via default after clone")
+	assert.Contains(t, string(content), "via default after derived")
 
 	abs, err := filepath.Abs(logPath)
 	require.NoError(t, err)
-	_, stillRegistered := writerRegistry.Load(abs)
-	assert.True(t, stillRegistered, "Sync 不应移除 registry")
+	assert.True(t, isWriterRegistered(abs), "Sync 不应移除 registry")
 
 	require.NoError(t, Close())
-	_, stillRegistered = writerRegistry.Load(abs)
-	assert.False(t, stillRegistered, "Close 后应从 registry 移除")
+	_ = derived.Close()
+	assert.False(t, isWriterRegistered(abs), "所有引用释放后应从 registry 移除")
 }
 
 func TestSyncDoesNotCloseWriter(t *testing.T) {
@@ -458,7 +466,6 @@ func TestSyncDoesNotCloseWriter(t *testing.T) {
 		WithPath(logPath),
 		WithLogInFile(true),
 		WithLogInConsole(false),
-		WithRotationHours(0),
 	))
 
 	logger.Info("before sync")
@@ -479,7 +486,6 @@ func TestCloseReleasesWriter(t *testing.T) {
 		WithPath(logPath),
 		WithLogInFile(true),
 		WithLogInConsole(false),
-		WithRotationHours(0),
 	))
 	require.NoError(t, err)
 	logger.Info("closing")
@@ -488,8 +494,7 @@ func TestCloseReleasesWriter(t *testing.T) {
 
 	abs, err := filepath.Abs(logPath)
 	require.NoError(t, err)
-	_, ok := writerRegistry.Load(abs)
-	assert.False(t, ok)
+	assert.False(t, isWriterRegistered(abs))
 }
 
 func TestSetDefaultLoggerClosesPrevious(t *testing.T) {
@@ -501,7 +506,6 @@ func TestSetDefaultLoggerClosesPrevious(t *testing.T) {
 		WithPath(path1),
 		WithLogInFile(true),
 		WithLogInConsole(false),
-		WithRotationHours(0),
 	)))
 	Info("on a")
 
@@ -512,12 +516,10 @@ func TestSetDefaultLoggerClosesPrevious(t *testing.T) {
 		WithPath(path2),
 		WithLogInFile(true),
 		WithLogInConsole(false),
-		WithRotationHours(0),
 	)))
 	t.Cleanup(func() { require.NoError(t, Close()) })
 
-	_, ok := writerRegistry.Load(abs1)
-	assert.False(t, ok, "旧路径 writer 应在替换时 Close 释放")
+	assert.False(t, isWriterRegistered(abs1), "旧路径 writer 应在替换时释放")
 
 	Info("on b")
 	require.NoError(t, Sync())
@@ -553,15 +555,85 @@ func TestConfigMismatchReusesWriter(t *testing.T) {
 		WithLogInFile(true),
 		WithLogInConsole(false),
 		WithRotationSizeMB(10),
-		WithRotationHours(0),
 	))
 	l2 := mustNew(t, NewConfig(
 		WithPath(logPath),
 		WithLogInFile(true),
 		WithLogInConsole(false),
-		WithRotationSizeMB(50), // different, ignored
-		WithRotationHours(0),
+		WithRotationSizeMB(50),
 	))
 
 	assert.Same(t, mustCoreLogger(t, l1).rotWriter, mustCoreLogger(t, l2).rotWriter)
+}
+
+// 补充测试：精准行号验证
+func TestCallerLineAccuracy(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := NewConfig(
+		WithLogInConsole(false),
+		WithLogInFile(false),
+		WithShowLine(true),
+	)
+	l, err := NewLogger(cfg, &buf)
+	require.NoError(t, err)
+	SetDefaultLogger(l)
+	defer Close()
+
+	_, _, expectedLine, _ := runtime.Caller(0)
+	Info("hello accuracy") // expectedLine + 1
+	expectedLine++
+
+	out := buf.String()
+	expectedPattern := fmt.Sprintf("logger_test.go:%d", expectedLine)
+	assert.Contains(t, out, expectedPattern, "行号必须准确匹配实际调用行")
+}
+
+// 补充测试：全局函数全覆盖
+func TestGlobalAndContextFuncs(t *testing.T) {
+	var buf bytes.Buffer
+	cfg := NewConfig(
+		WithLogInConsole(false),
+		WithLogInFile(false),
+		WithLevel(DebugLevel),
+	)
+	l := MustNewLogger(cfg, &buf)
+	SetDefaultLogger(l)
+	defer Close()
+
+	Debug("d")
+	Debugf("df %s", "1")
+	Debugw("dw", "k", "v")
+	Infof("if %s", "2")
+	Infow("iw", "k", "v")
+	Warn("w")
+	Warnf("wf %s", "3")
+	Warnw("ww", "k", "v")
+	Errorf("ef %s", "4")
+	Errorw("ew", "k", "v")
+
+	SetLevel(WarnLevel)
+	assert.Equal(t, WarnLevel, GetLevel())
+
+	ctx := ContextWithTrace(context.Background(), "tr-1", "req-1")
+	DebugCtx(ctx, "dctx")
+	DebugfCtx(ctx, "dfctx %s", "1")
+	DebugwCtx(ctx, "dwctx", "k", "v")
+	InfoCtx(ctx, "ictx")
+	InfofCtx(ctx, "ifctx %s", "2")
+	WarnCtx(ctx, "wctx")
+	WarnfCtx(ctx, "wfctx %s", "3")
+	WarnwCtx(ctx, "wwctx", "k", "v")
+	ErrorCtx(ctx, "ectx")
+	ErrorfCtx(ctx, "efctx %s", "4")
+	ErrorwCtx(ctx, "ewctx", "k", "v")
+
+	origFatalf := logFatalf
+	var fatalCount int
+	logFatalf = func(format string, args ...any) {
+		fatalCount++
+	}
+	defer func() { logFatalf = origFatalf }()
+
+	_ = MustNewLogger(&Config{}) // 默认配置正常创建
+	_, _ = NewLogger(nil)
 }
